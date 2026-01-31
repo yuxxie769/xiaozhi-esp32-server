@@ -35,6 +35,7 @@ from config.config_loader import get_config_from_api_async
 from core.auth import AuthManager, AuthenticationError
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_vad_update, check_asr_update
+from plugins_func.loadplugins import auto_import_modules
 
 TAG = __name__
 
@@ -44,6 +45,8 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging()
         self.config_lock = asyncio.Lock()
+        self.active_connections_by_device = {}
+        self._service_tasks = []
         modules = initialize_modules(
             self.logger,
             self.config,
@@ -67,6 +70,10 @@ class WebSocketServer:
         secret_key = self.config["server"]["auth_key"]
         expire_seconds = auth_config.get("expire_seconds", None)
         self.auth = AuthManager(secret_key=secret_key, expire_seconds=expire_seconds)
+        try:
+            auto_import_modules("plugins_func.services")
+        except Exception:
+            pass
 
     async def start(self):
         server_config = self.config["server"]
@@ -76,6 +83,12 @@ class WebSocketServer:
         async with websockets.serve(
             self._handle_connection, host, port, process_request=self._http_response
         ):
+            try:
+                from plugins_func.services.registry import start_all_services
+
+                self._service_tasks = start_all_services(self)
+            except Exception:
+                self._service_tasks = []
             await asyncio.Future()
 
     async def _handle_connection(self, websocket):
@@ -124,10 +137,25 @@ class WebSocketServer:
             self,  # 传入server实例
         )
         try:
+            device_id = websocket.request.headers.get("device-id")
+            client_id = websocket.request.headers.get("client-id") or device_id
+            if device_id:
+                handler.device_id = device_id
+                handler.client_id = client_id
+                self.active_connections_by_device[device_id] = handler
+        except Exception:
+            pass
+        try:
             await handler.handle_connection(websocket)
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"处理连接时出错: {e}")
         finally:
+            try:
+                device_id = getattr(handler, "device_id", None) or websocket.request.headers.get("device-id")
+                if device_id and self.active_connections_by_device.get(device_id) is handler:
+                    self.active_connections_by_device.pop(device_id, None)
+            except Exception:
+                pass
             # 强制关闭连接（如果还没有关闭的话）
             try:
                 # 安全地检查WebSocket状态并关闭
@@ -160,6 +188,11 @@ class WebSocketServer:
         """
         try:
             async with self.config_lock:
+                scheduled_greeting_cfg = (
+                    (self.config.get("plugins") or {}).get("scheduled_greeting")
+                    if isinstance(self.config, dict)
+                    else None
+                )
                 # 重新获取配置（使用异步版本）
                 new_config = await get_config_from_api_async(self.config)
                 if new_config is None:
@@ -174,6 +207,10 @@ class WebSocketServer:
                 )
                 # 更新配置
                 self.config = new_config
+                if scheduled_greeting_cfg is not None:
+                    if not isinstance(self.config.get("plugins"), dict):
+                        self.config["plugins"] = {}
+                    self.config["plugins"]["scheduled_greeting"] = scheduled_greeting_cfg
                 # 重新初始化组件
                 modules = initialize_modules(
                     self.logger,

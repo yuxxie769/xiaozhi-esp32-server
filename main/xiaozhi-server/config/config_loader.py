@@ -79,6 +79,15 @@ async def get_config_from_api_async(config):
             "auth_key": config["server"].get("auth_key", ""),
         }
     config_data["server"]["auth"] = {"enabled": auth_enabled}
+    # Merge local-only plugin configs (keep scope minimal to avoid overriding manager settings).
+    # This enables server-side services (e.g. scheduled greeting) to be configured via data/.config.yaml.
+    local_plugins = config.get("plugins", {}) if isinstance(config, dict) else {}
+    if isinstance(local_plugins, dict) and "scheduled_greeting" in local_plugins:
+        if not isinstance(config_data.get("plugins"), dict):
+            config_data["plugins"] = {}
+        config_data["plugins"]["scheduled_greeting"] = local_plugins.get(
+            "scheduled_greeting", {}
+        )
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")

@@ -1,6 +1,7 @@
 import json
 
 from core.handle.textMessageHandlerRegistry import TextMessageHandlerRegistry
+from core.handle.textMessageType import TextMessageType
 
 TAG = __name__
 
@@ -22,7 +23,10 @@ class TextMessageProcessor:
                 message_type = msg_json.get("type")
 
                 # 记录日志
-                conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
+                if message_type == TextMessageType.PING.value:
+                    conn.logger.bind(tag=TAG).debug(f"收到{message_type}消息：{message}")
+                else:
+                    conn.logger.bind(tag=TAG).info(f"收到{message_type}消息：{message}")
 
                 # 获取并执行处理器
                 handler = self.registry.get_handler(message_type)

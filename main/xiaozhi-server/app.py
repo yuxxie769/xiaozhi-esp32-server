@@ -5,7 +5,7 @@ import asyncio
 from aioconsole import ainput
 from config.settings import load_config
 from config.logger import setup_logging
-from core.utils.util import get_local_ip, validate_mcp_endpoint
+from core.utils.util import get_local_ip, get_vision_url, validate_mcp_endpoint
 from core.http_server import SimpleHttpServer
 from core.websocket_server import WebSocketServer
 from core.utils.util import check_ffmpeg_installed
@@ -83,11 +83,7 @@ async def main():
             get_local_ip(),
             port,
         )
-    logger.bind(tag=TAG).info(
-        "视觉分析接口是\thttp://{}:{}/mcp/vision/explain",
-        get_local_ip(),
-        port,
-    )
+    logger.bind(tag=TAG).info("视觉分析接口是\t{}", get_vision_url(config))
     mcp_endpoint = config.get("mcp_endpoint", None)
     if mcp_endpoint is not None and "你" not in mcp_endpoint:
         # 校验MCP接入点格式
@@ -106,10 +102,17 @@ async def main():
     if isinstance(server_config, dict):
         websocket_port = int(server_config.get("port", 8000))
 
+    websocket_cfg = ""
+    if isinstance(server_config, dict):
+        websocket_cfg = server_config.get("websocket", "") or ""
+    if websocket_cfg and "你的" not in websocket_cfg:
+        websocket_url = websocket_cfg
+    else:
+        websocket_url = f"ws://{get_local_ip()}:{websocket_port}/xiaozhi/v1/"
+
     logger.bind(tag=TAG).info(
-        "Websocket地址是\tws://{}:{}/xiaozhi/v1/",
-        get_local_ip(),
-        websocket_port,
+        "Websocket地址是\t{}",
+        websocket_url,
     )
 
     logger.bind(tag=TAG).info(

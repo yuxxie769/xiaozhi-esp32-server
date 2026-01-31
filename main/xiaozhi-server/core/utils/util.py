@@ -5,10 +5,12 @@ import copy
 import wave
 import socket
 import asyncio
+import ipaddress
 import requests
 import subprocess
 import numpy as np
 import opuslib_next
+import psutil
 from io import BytesIO
 from core.utils import p3
 from pydub import AudioSegment
@@ -18,15 +20,83 @@ TAG = __name__
 
 
 def get_local_ip():
+    """
+    Best-effort guess of the host's LAN IPv4 address.
+
+    Notes:
+    - The previous implementation relied on the route to 8.8.8.8. When VPN / Docker / virtual adapters
+      are present, this may return an unreachable interface IP (e.g. 198.18.0.0/15).
+    - We now prefer RFC1918 addresses from local interfaces, and avoid common "non-LAN" ranges.
+    """
+
+    banned_v4_networks = (
+        ipaddress.ip_network("0.0.0.0/32"),
+        ipaddress.ip_network("127.0.0.0/8"),  # loopback
+        ipaddress.ip_network("169.254.0.0/16"),  # link-local
+        ipaddress.ip_network("198.18.0.0/15"),  # benchmarking (often used by VPN/virtual)
+    )
+    preferred_v4_networks = (
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("100.64.0.0/10"),  # CGNAT (some LANs / hotspots)
+    )
+
+    def is_banned_ipv4(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+            if addr.version != 4:
+                return True
+            return any(addr in net for net in banned_v4_networks)
+        except Exception:
+            return True
+
+    def score_ipv4(ip: str) -> int:
+        if is_banned_ipv4(ip):
+            return -1
+        try:
+            addr = ipaddress.ip_address(ip)
+            for i, net in enumerate(preferred_v4_networks):
+                if addr in net:
+                    return 100 - i * 10
+            return 1
+        except Exception:
+            return -1
+
+    route_ip: str | None = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Connect to Google's DNS servers
         s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
+        route_ip = s.getsockname()[0]
         s.close()
-        return local_ip
-    except Exception as e:
-        return "127.0.0.1"
+    except Exception:
+        route_ip = None
+
+    # Prefer the routed IP only if it's a good LAN candidate.
+    if route_ip and score_ipv4(route_ip) >= 90:
+        return route_ip
+
+    # Enumerate interfaces and pick the best LAN candidate.
+    best_ip: str | None = None
+    best_score = -1
+    try:
+        for _, addrs in psutil.net_if_addrs().items():
+            for a in addrs:
+                if a.family != socket.AF_INET:
+                    continue
+                ip = a.address
+                s = score_ipv4(ip)
+                if s > best_score:
+                    best_score = s
+                    best_ip = ip
+    except Exception:
+        best_ip = None
+
+    if best_ip and best_score > 0:
+        return best_ip
+    if route_ip and not is_banned_ipv4(route_ip):
+        return route_ip
+    return "127.0.0.1"
 
 
 def is_private_ip(ip_addr):
