@@ -110,4 +110,10 @@ def is_emoji(char):
 
 def check_emoji(text):
     """去除文本中的所有emoji表情"""
-    return ''.join(char for char in text if not is_emoji(char) and char != "\n")
+    # Also remove emoji variation selectors / joiners that may remain after stripping emojis.
+    emoji_modifiers = {"\ufe0f", "\ufe0e", "\u200d"}
+    return "".join(
+        char
+        for char in text
+        if not is_emoji(char) and char not in emoji_modifiers and char != "\n"
+    )

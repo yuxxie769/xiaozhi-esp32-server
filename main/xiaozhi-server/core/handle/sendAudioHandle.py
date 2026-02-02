@@ -276,6 +276,12 @@ async def send_tts_message(conn, state, text=None):
         await _wait_for_audio_completion(conn)
         # 清除服务端讲话状态
         conn.clearSpeakStatus()
+        # 记录本次播报“完全结束”的时间戳（用于期待回复/跟进计时从播报结束开始）
+        try:
+            conn.last_tts_stop_time = time.time() * 1000
+            conn.last_tts_sentence_id = getattr(conn, "sentence_id", None)
+        except Exception:
+            pass
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))

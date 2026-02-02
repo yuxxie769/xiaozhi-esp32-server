@@ -188,10 +188,8 @@ class WebSocketServer:
         """
         try:
             async with self.config_lock:
-                scheduled_greeting_cfg = (
-                    (self.config.get("plugins") or {}).get("scheduled_greeting")
-                    if isinstance(self.config, dict)
-                    else None
+                old_plugins = (
+                    (self.config.get("plugins") or {}) if isinstance(self.config, dict) else {}
                 )
                 # 重新获取配置（使用异步版本）
                 new_config = await get_config_from_api_async(self.config)
@@ -207,10 +205,14 @@ class WebSocketServer:
                 )
                 # 更新配置
                 self.config = new_config
-                if scheduled_greeting_cfg is not None:
+                # Preserve locally-added plugins across config refreshes (additive only).
+                if isinstance(old_plugins, dict) and old_plugins:
                     if not isinstance(self.config.get("plugins"), dict):
                         self.config["plugins"] = {}
-                    self.config["plugins"]["scheduled_greeting"] = scheduled_greeting_cfg
+                    for plugin_key, plugin_cfg in old_plugins.items():
+                        if plugin_key in self.config["plugins"]:
+                            continue
+                        self.config["plugins"][plugin_key] = plugin_cfg
                 # 重新初始化组件
                 modules = initialize_modules(
                     self.logger,

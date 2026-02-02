@@ -99,7 +99,11 @@ async def startToChat(conn, text):
 
 async def no_voice_close_connect(conn, have_voice):
     if have_voice:
-        conn.last_activity_time = time.time() * 1000
+        now_ms = time.time() * 1000
+        conn.last_activity_time = now_ms
+        conn.last_user_activity_time = now_ms
+        # 用户开始说话，取消“期待回复”状态（如果有）
+        conn.expect_user_reply = False
         return
     # 只有在已经初始化过时间戳的情况下才进行超时检查
     if conn.last_activity_time > 0.0:

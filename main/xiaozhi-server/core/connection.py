@@ -124,6 +124,11 @@ class ConnectionHandler:
         self.client_voice_window = deque(maxlen=5)
         self.first_activity_time = 0.0  # 记录首次活动的时间（毫秒）
         self.last_activity_time = 0.0  # 统一的活动时间戳（毫秒）
+        # 仅用户侧活动时间戳（毫秒）：用于“期待回复/跟进”等逻辑，避免被服务端 TTS 发送刷新。
+        self.last_user_activity_time = 0.0
+        # 最近一次 TTS 完全结束的时间戳（毫秒），以及对应的 sentence_id（用于跟进计时从播报结束开始）
+        self.last_tts_stop_time = 0.0
+        self.last_tts_sentence_id = None
         self.client_voice_stop = False
         self.last_is_voice = False
 
@@ -168,6 +173,9 @@ class ConnectionHandler:
 
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(self.config, self.logger)
+
+        # 是否期待用户回复（由主 LLM 在输出中标记，见 chat() 中的 <Q> 处理）
+        self.expect_user_reply = False
 
     async def handle_connection(self, ws):
         try:
@@ -797,7 +805,13 @@ class ConnectionHandler:
 
     def chat(self, query, depth=0):
         if query is not None:
-            self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
+            q = str(query)
+            if len(q) > 400:
+                self.logger.bind(tag=TAG).info(
+                    f"大模型收到用户消息: {q[:400]}...(len={len(q)})"
+                )
+            else:
+                self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {q}")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -840,6 +854,28 @@ class ConnectionHandler:
             functions = self.func_handler.get_functions()
         response_message = []
 
+        debug_cfg = self.config.get("debug", {}) if isinstance(self.config, dict) else {}
+        llm_debug_cfg = (
+            debug_cfg.get("llm", {}) if isinstance(debug_cfg, dict) else {}
+        )
+        log_llm_request = bool(
+            llm_debug_cfg.get("log_request", False)
+            or os.getenv("XIAOZHI_LOG_LLM_REQUEST") == "1"
+        )
+        log_llm_response = bool(
+            llm_debug_cfg.get("log_response", False)
+            or os.getenv("XIAOZHI_LOG_LLM_RESPONSE") == "1"
+        )
+        log_llm_include_nested = bool(
+            llm_debug_cfg.get("include_nested", False)
+            or os.getenv("XIAOZHI_LOG_LLM_NESTED") == "1"
+        )
+        try:
+            log_llm_max_chars = int(llm_debug_cfg.get("max_chars", 8000))
+        except Exception:
+            log_llm_max_chars = 8000
+        enable_llm_logging_this_call = depth == 0 or log_llm_include_nested
+
         try:
             # 使用带记忆的对话
             memory_str = None
@@ -849,21 +885,65 @@ class ConnectionHandler:
                 )
                 memory_str = future.result()
 
+            llm_dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                memory_str, self.config.get("voiceprint", {})
+            )
+            if enable_llm_logging_this_call and log_llm_request:
+                try:
+                    tool_names = []
+                    if functions and isinstance(functions, list):
+                        for tool in functions:
+                            if not isinstance(tool, dict):
+                                continue
+                            func = tool.get("function", {}) if isinstance(tool, dict) else {}
+                            name = func.get("name") if isinstance(func, dict) else None
+                            if name:
+                                tool_names.append(name)
+                    tools_preview = tool_names[:50]
+                    tools_suffix = "" if len(tool_names) <= 50 else f"...(+{len(tool_names) - 50})"
+                    system_prompt = ""
+                    for m in llm_dialogue:
+                        if isinstance(m, dict) and m.get("role") == "system":
+                            system_prompt = str(m.get("content", ""))
+                            break
+                    system_prompt_preview = system_prompt
+                    truncated = False
+                    if system_prompt_preview and len(system_prompt_preview) > log_llm_max_chars:
+                        system_prompt_preview = system_prompt_preview[:log_llm_max_chars]
+                        truncated = True
+                    self.logger.bind(tag=TAG).info(
+                        f"LLM请求(depth={depth}) device={self.device_id}, session={self.session_id}, "
+                        f"messages={len(llm_dialogue)}, memory_len={0 if memory_str is None else len(str(memory_str))}, "
+                        f"tools={len(tool_names)} {tools_preview}{tools_suffix}, system_prompt_truncated={truncated}"
+                    )
+                    if system_prompt_preview:
+                        self.logger.bind(tag=TAG).info(
+                            f"LLM请求-最终system prompt(depth={depth}): {system_prompt_preview}"
+                        )
+                    try:
+                        messages_json = json.dumps(llm_dialogue, ensure_ascii=False)
+                        if len(messages_json) > log_llm_max_chars:
+                            messages_json = messages_json[:log_llm_max_chars]
+                            messages_json += "...(truncated)"
+                        self.logger.bind(tag=TAG).info(
+                            f"LLM请求-最终messages JSON(depth={depth}): {messages_json}"
+                        )
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.logger.bind(tag=TAG).warning(f"LLM请求日志打印失败: {e}")
+
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
-                    ),
+                    llm_dialogue,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
-                    ),
+                    llm_dialogue,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
@@ -876,6 +956,78 @@ class ConnectionHandler:
         content_arguments = ""
         self.client_abort = False
         emotion_flag = True
+
+        CONTROL_TAG_EXPECT_REPLY = "<Q>"
+        expect_user_reply = False
+        expect_user_reply_logged = False
+        fallback_expect_user_reply = False
+        fallback_expect_user_reply_logged = False
+        prefix_buffer = ""
+        prefix_processed = False
+        raw_stream_parts = []
+        raw_stream_len = 0
+
+        def _strip_control_tags(chunk: str) -> str:
+            nonlocal expect_user_reply, expect_user_reply_logged, prefix_buffer, prefix_processed
+            if not chunk:
+                return ""
+
+            # Fast-path: tag present in the same chunk
+            if CONTROL_TAG_EXPECT_REPLY in chunk:
+                expect_user_reply = True
+                # Propagate to connection-level state immediately so services can observe it even when
+                # the final assistant response is produced in a nested chat() call (e.g. tool results).
+                self.expect_user_reply = True
+                if not expect_user_reply_logged:
+                    expect_user_reply_logged = True
+                    self.logger.bind(tag=TAG).info(
+                        f"检测到<Q>期待回复标记: device={self.device_id}, session={self.session_id}"
+                    )
+                chunk = chunk.replace(CONTROL_TAG_EXPECT_REPLY, "")
+
+            # Prefix handling to avoid speaking the tag in streaming TTS.
+            # We buffer the very beginning of the assistant output to detect/remove a leading <Q>,
+            # then flush the remaining content.
+            if not prefix_processed:
+                prefix_buffer += chunk
+                # Wait until we have enough to decide (newline or some bytes).
+                if "\n" not in prefix_buffer and len(prefix_buffer) < 16:
+                    return ""
+
+                stripped = prefix_buffer.lstrip()
+                if stripped.startswith(CONTROL_TAG_EXPECT_REPLY):
+                    expect_user_reply = True
+                    self.expect_user_reply = True
+                    if not expect_user_reply_logged:
+                        expect_user_reply_logged = True
+                        self.logger.bind(tag=TAG).info(
+                            f"检测到<Q>期待回复标记(前缀): device={self.device_id}, session={self.session_id}"
+                        )
+                    stripped = stripped[len(CONTROL_TAG_EXPECT_REPLY) :]
+                    stripped = stripped.lstrip("\r\n\t ")
+                prefix_processed = True
+                prefix_buffer = ""
+                return stripped
+
+            return chunk
+
+        def _maybe_mark_expect_reply_from_text(text: str) -> None:
+            nonlocal fallback_expect_user_reply, fallback_expect_user_reply_logged
+            if not text:
+                return
+            if expect_user_reply or getattr(self, "expect_user_reply", False):
+                return
+            # Fallback: if the model forgot to emit <Q> but produced an explicit question mark,
+            # treat it as expecting a user reply so follow-up logic remains reliable.
+            if "?" in text or "？" in text:
+                fallback_expect_user_reply = True
+                self.expect_user_reply = True
+                if not fallback_expect_user_reply_logged:
+                    fallback_expect_user_reply_logged = True
+                    self.logger.bind(tag=TAG).info(
+                        f"检测到疑问符但未见<Q>，启用期待回复兜底: device={self.device_id}, session={self.session_id}"
+                    )
+
         for response in llm_responses:
             if self.client_abort:
                 break
@@ -885,6 +1037,17 @@ class ConnectionHandler:
                     content = response["content"]
                     tools_call = None
                 if content is not None and len(content) > 0:
+                    if (
+                        enable_llm_logging_this_call
+                        and log_llm_response
+                        and raw_stream_len < log_llm_max_chars
+                    ):
+                        take = content
+                        if raw_stream_len + len(take) > log_llm_max_chars:
+                            take = take[: max(0, log_llm_max_chars - raw_stream_len)]
+                        if take:
+                            raw_stream_parts.append(take)
+                            raw_stream_len += len(take)
                     content_arguments += content
 
                 if not tool_call_flag and content_arguments.startswith("<tool_call>"):
@@ -896,6 +1059,19 @@ class ConnectionHandler:
                     self._merge_tool_calls(tool_calls_list, tools_call)
             else:
                 content = response
+                if (
+                    enable_llm_logging_this_call
+                    and log_llm_response
+                    and content is not None
+                    and len(str(content)) > 0
+                    and raw_stream_len < log_llm_max_chars
+                ):
+                    take = str(content)
+                    if raw_stream_len + len(take) > log_llm_max_chars:
+                        take = take[: max(0, log_llm_max_chars - raw_stream_len)]
+                    if take:
+                        raw_stream_parts.append(take)
+                        raw_stream_len += len(take)
 
             # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
             if emotion_flag and content is not None and content.strip():
@@ -907,16 +1083,52 @@ class ConnectionHandler:
 
             if content is not None and len(content) > 0:
                 if not tool_call_flag:
-                    response_message.append(content)
-                    self.tts.tts_text_queue.put(
-                        TTSMessageDTO(
-                            sentence_id=self.sentence_id,
-                            sentence_type=SentenceType.MIDDLE,
-                            content_type=ContentType.TEXT,
-                            content_detail=content,
+                    cleaned = _strip_control_tags(content)
+                    if cleaned:
+                        _maybe_mark_expect_reply_from_text(cleaned)
+                        response_message.append(cleaned)
+                        self.tts.tts_text_queue.put(
+                            TTSMessageDTO(
+                                sentence_id=self.sentence_id,
+                                sentence_type=SentenceType.MIDDLE,
+                                content_type=ContentType.TEXT,
+                                content_detail=cleaned,
+                            )
                         )
-                    )
         # 处理function call
+        if enable_llm_logging_this_call and log_llm_response:
+            try:
+                raw_text = "".join(raw_stream_parts)
+                raw_text_truncated = raw_stream_len >= log_llm_max_chars
+                tool_calls_preview = []
+                if tool_calls_list and isinstance(tool_calls_list, list):
+                    for tc in tool_calls_list[:10]:
+                        if not isinstance(tc, dict):
+                            continue
+                        args = tc.get("arguments", "")
+                        if isinstance(args, str) and len(args) > 2000:
+                            args = args[:2000]
+                        tool_calls_preview.append(
+                            {"id": tc.get("id", ""), "name": tc.get("name", ""), "arguments": args}
+                        )
+                tool_calls_suffix = (
+                    "" if len(tool_calls_list) <= 10 else f"...(+{len(tool_calls_list) - 10})"
+                )
+                self.logger.bind(tag=TAG).info(
+                    f"LLM原生输出(depth={depth}) device={self.device_id}, session={self.session_id}, "
+                    f"raw_len={len(raw_text)}, raw_truncated={raw_text_truncated}, tool_calls={len(tool_calls_list)}"
+                )
+                if raw_text:
+                    self.logger.bind(tag=TAG).info(
+                        f"LLM原生输出-拼接文本(depth={depth}): {raw_text}"
+                    )
+                if tool_calls_preview:
+                    self.logger.bind(tag=TAG).info(
+                        f"LLM原生输出-工具调用(depth={depth}): {json.dumps(tool_calls_preview, ensure_ascii=False)}{tool_calls_suffix}"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"LLM原生输出日志打印失败: {e}")
+
         if tool_call_flag:
             bHasError = False
             # 处理基于文本的工具调用格式
@@ -984,6 +1196,24 @@ class ConnectionHandler:
                     self._handle_function_result(tool_results, depth=depth)
 
         # 存储对话内容
+        if not tool_call_flag and not prefix_processed and prefix_buffer:
+            stripped = prefix_buffer.lstrip()
+            if stripped.startswith(CONTROL_TAG_EXPECT_REPLY):
+                expect_user_reply = True
+                stripped = stripped[len(CONTROL_TAG_EXPECT_REPLY) :]
+                stripped = stripped.lstrip("\r\n\t ")
+            prefix_processed = True
+            prefix_buffer = ""
+            if stripped:
+                response_message.append(stripped)
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.MIDDLE,
+                        content_type=ContentType.TEXT,
+                        content_detail=stripped,
+                    )
+                )
         if len(response_message) > 0:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
@@ -997,6 +1227,12 @@ class ConnectionHandler:
                 )
             )
             self.llm_finish_task = True
+            # Keep any <Q> detected in nested chat() calls (e.g. tool follow-up generation).
+            self.expect_user_reply = bool(self.expect_user_reply or expect_user_reply)
+            if self.expect_user_reply:
+                self.logger.bind(tag=TAG).info(
+                    f"本轮对话标记为期待用户回复: device={self.device_id}, session={self.session_id}"
+                )
             # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
             self.logger.bind(tag=TAG).debug(
                 lambda: json.dumps(

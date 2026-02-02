@@ -47,7 +47,11 @@ class ListenTextMessageHandler(TextMessageHandler):
             conn.client_have_voice = False
             conn.asr_audio.clear()
             if "text" in msg_json:
-                conn.last_activity_time = time.time() * 1000
+                now_ms = time.time() * 1000
+                conn.last_activity_time = now_ms
+                conn.last_user_activity_time = now_ms
+                # 用户有新输入，取消“期待回复”状态（如果有）
+                conn.expect_user_reply = False
                 original_text = msg_json["text"]  # 保留原始文本
                 filtered_len, filtered_text = remove_punctuation_and_length(
                     original_text
