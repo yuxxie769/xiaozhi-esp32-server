@@ -35,14 +35,35 @@ def build_module_string(selected_module):
     )
 
 
-def formatter(record):
-    """为没有 tag 的日志添加默认值，并处理动态模块字符串"""
+def _patch_record(record):
+    """为没有 tag 的日志添加默认值，并处理动态模块字符串。"""
     record["extra"].setdefault("tag", record["name"])
     # 如果没有设置 selected_module，使用默认值
     record["extra"].setdefault("selected_module", "00000000000000")
     # 将 selected_module 从 extra 提取到顶级，以支持 {selected_module} 格式
     record["selected_module"] = record["extra"]["selected_module"]
-    return record["message"]
+    return True
+
+
+def _console_filter(record):
+    """
+    控制台日志过滤器（同时用于 patch record）。
+
+    Loguru 在 colorize 模式下会解析输出中的 `<...>` 标记；当 message 本身包含
+    `<identity>` 等非 Loguru 颜色标签时，会导致 sink 抛异常并出现
+    “Logging error in Loguru Handler …”。
+    """
+    _patch_record(record)
+    message = record.get("message")
+    if isinstance(message, str) and ("<" in message or ">" in message):
+        record["message"] = message.replace("<", "\\<").replace(">", "\\>")
+    return True
+
+
+def _file_filter(record):
+    """文件日志过滤器（仅 patch record，不转义 message）。"""
+    _patch_record(record)
+    return True
 
 
 def setup_logging():
@@ -84,7 +105,7 @@ def setup_logging():
         logger.remove()
 
         # 输出到控制台
-        logger.add(sys.stdout, format=log_format, level=log_level, filter=formatter)
+        logger.add(sys.stdout, format=log_format, level=log_level, filter=_console_filter)
 
         # 输出到文件 - 统一目录，按大小轮转
         # 日志文件完整路径
@@ -95,7 +116,7 @@ def setup_logging():
             log_file_path,
             format=log_format_file,
             level=log_level,
-            filter=formatter,
+            filter=_file_filter,
             rotation="10 MB",  # 每个文件最大10MB
             retention="30 days",  # 保留30天
             compression=None,

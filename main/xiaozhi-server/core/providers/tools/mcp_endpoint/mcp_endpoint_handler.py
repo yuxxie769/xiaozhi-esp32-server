@@ -53,6 +53,13 @@ async def _message_listener(mcp_client: MCPEndpointClient):
         logger.bind(tag=TAG).error(f"MCP接入点消息监听器错误: {e}")
     finally:
         await mcp_client.set_ready(False)
+        try:
+            conn = getattr(mcp_client, "conn", None)
+            if conn and getattr(conn, "func_handler", None):
+                conn.func_handler.tool_manager.refresh_tools()
+                conn.func_handler.current_support_functions()
+        except Exception:
+            pass
 
 
 async def handle_mcp_endpoint_message(mcp_client: MCPEndpointClient, message: str):

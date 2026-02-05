@@ -80,21 +80,90 @@ async def get_config_from_api_async(config):
         }
     config_data["server"]["auth"] = {"enabled": auth_enabled}
     # Merge local plugin configs from data/.config.yaml.
-    # Keep scope minimal: only *add* plugins not provided by manager-api, don't override manager settings.
+    # Keep scope minimal: only *add* missing keys, don't override manager settings.
     local_plugins = config.get("plugins", {}) if isinstance(config, dict) else {}
     if isinstance(local_plugins, dict) and local_plugins:
         if not isinstance(config_data.get("plugins"), dict):
             config_data["plugins"] = {}
+
+        def _merge_missing(dst, src):
+            if not isinstance(dst, dict) or not isinstance(src, dict):
+                return dst
+            for k, v in src.items():
+                if k not in dst:
+                    dst[k] = v
+                    continue
+                if isinstance(dst.get(k), dict) and isinstance(v, dict):
+                    _merge_missing(dst[k], v)
+            return dst
+
         for plugin_key, plugin_cfg in local_plugins.items():
-            if plugin_key in config_data["plugins"]:
+            if plugin_key not in config_data["plugins"]:
+                config_data["plugins"][plugin_key] = plugin_cfg
                 continue
-            config_data["plugins"][plugin_key] = plugin_cfg
+            if isinstance(config_data["plugins"].get(plugin_key), dict) and isinstance(plugin_cfg, dict):
+                _merge_missing(config_data["plugins"][plugin_key], plugin_cfg)
 
     # Merge local debug switches from data/.config.yaml so operators can enable verbose logging
     # without requiring manager-api support for these fields.
     local_debug = config.get("debug", {}) if isinstance(config, dict) else {}
     if isinstance(local_debug, dict) and local_debug:
         config_data["debug"] = merge_configs(config_data.get("debug", {}) or {}, local_debug)
+
+    # Merge local Intent functions (additive only) so operators can extend tool availability
+    # without requiring manager-api support for newly added plugin tools.
+    #
+    # Note: manager-api configs may use module IDs like "Intent_function_call" as the key under "Intent",
+    # while local examples often use "function_call". We map local functions into the active remote key.
+    local_intent = config.get("Intent", {}) if isinstance(config, dict) else {}
+    if isinstance(local_intent, dict) and local_intent:
+        if not isinstance(config_data.get("Intent"), dict):
+            config_data["Intent"] = {}
+
+        active_intent_key = (config_data.get("selected_module") or {}).get("Intent")
+        active_intent_key = str(active_intent_key or "").strip() or None
+
+        def _get_functions_from_intent_key(key: str) -> list[str]:
+            cfg = local_intent.get(key)
+            if not isinstance(cfg, dict):
+                return []
+            fns = cfg.get("functions")
+            if not isinstance(fns, list):
+                return []
+            return [str(x) for x in fns if x]
+
+        local_functions: list[str] = []
+        if active_intent_key:
+            # Prefer exact match first.
+            local_functions = _get_functions_from_intent_key(active_intent_key)
+            # Then try common aliases.
+            if not local_functions:
+                if "function_call" in active_intent_key and "function_call" in local_intent:
+                    local_functions = _get_functions_from_intent_key("function_call")
+                elif "intent_llm" in active_intent_key and "intent_llm" in local_intent:
+                    local_functions = _get_functions_from_intent_key("intent_llm")
+                elif "nointent" in active_intent_key and "nointent" in local_intent:
+                    local_functions = _get_functions_from_intent_key("nointent")
+
+        # Fallback: union everything if we still couldn't determine.
+        if not local_functions:
+            union: list[str] = []
+            for k in list(local_intent.keys()):
+                for fn in _get_functions_from_intent_key(str(k)):
+                    if fn not in union:
+                        union.append(fn)
+            local_functions = union
+
+        if local_functions and active_intent_key:
+            if active_intent_key not in config_data["Intent"] or not isinstance(config_data["Intent"].get(active_intent_key), dict):
+                config_data["Intent"][active_intent_key] = {}
+            remote_functions = config_data["Intent"][active_intent_key].get("functions")
+            if not isinstance(remote_functions, list):
+                remote_functions = []
+            for fn in local_functions:
+                if fn not in remote_functions:
+                    remote_functions.append(fn)
+            config_data["Intent"][active_intent_key]["functions"] = remote_functions
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")

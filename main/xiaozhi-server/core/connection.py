@@ -654,13 +654,93 @@ class ConnectionHandler:
             self.config["selected_module"]["Intent"] = model_intent
             # 加载插件配置
             if model_intent != "Intent_nointent":
-                plugin_from_server = private_config.get("plugins", {})
-                for plugin, config_str in plugin_from_server.items():
-                    plugin_from_server[plugin] = json.loads(config_str)
+                plugin_from_server = private_config.get("plugins", {}) or {}
+                if not isinstance(plugin_from_server, dict):
+                    plugin_from_server = {}
+                # Parse server plugin configs: manager-api returns JSON strings.
+                for plugin, config_str in list(plugin_from_server.items()):
+                    if isinstance(config_str, str):
+                        try:
+                            plugin_from_server[plugin] = json.loads(config_str)
+                        except Exception:
+                            plugin_from_server[plugin] = {}
+
+                # Keep the original server plugin names before merging local plugin configs.
+                # Local plugin configs are often just runtime parameters and should not
+                # automatically expand the LLM tool list.
+                server_plugin_names = list(plugin_from_server.keys())
+
                 self.config["plugins"] = plugin_from_server
-                self.config["Intent"][self.config["selected_module"]["Intent"]][
-                    "functions"
-                ] = plugin_from_server.keys()
+
+                # Merge local plugin configs (from data/.config.yaml) additively so server-side
+                # services/tools can be enabled without requiring manager-api fields.
+                local_plugins = (
+                    (self.common_config.get("plugins") or {})
+                    if isinstance(self.common_config, dict)
+                    else {}
+                )
+
+                def _merge_missing(dst: dict, src: dict) -> dict:
+                    if not isinstance(dst, dict) or not isinstance(src, dict):
+                        return dst
+                    for k, v in src.items():
+                        if k not in dst:
+                            dst[k] = v
+                            continue
+                        if isinstance(dst.get(k), dict) and isinstance(v, dict):
+                            _merge_missing(dst[k], v)
+                    return dst
+
+                if isinstance(local_plugins, dict) and local_plugins:
+                    if not isinstance(self.config.get("plugins"), dict):
+                        self.config["plugins"] = {}
+                    _merge_missing(self.config["plugins"], local_plugins)
+
+                # Merge local Intent.functions additively so the LLM can see newly added tools.
+                local_intent = (
+                    (self.common_config.get("Intent") or {})
+                    if isinstance(self.common_config, dict)
+                    else {}
+                )
+
+                def _get_local_functions(intent_key: str) -> list[str]:
+                    if not isinstance(local_intent, dict):
+                        return []
+                    cfg = local_intent.get(intent_key)
+                    if not isinstance(cfg, dict):
+                        return []
+                    fns = cfg.get("functions")
+                    if not isinstance(fns, list):
+                        return []
+                    return [str(x) for x in fns if x]
+
+                local_functions: list[str] = []
+                active_key = str(model_intent or "").strip()
+                if active_key:
+                    local_functions = _get_local_functions(active_key)
+                    if not local_functions:
+                        if "function_call" in active_key:
+                            local_functions = _get_local_functions("function_call")
+                        elif "intent_llm" in active_key:
+                            local_functions = _get_local_functions("intent_llm")
+                        elif "nointent" in active_key:
+                            local_functions = _get_local_functions("nointent")
+
+                merged_functions: list[str] = []
+                for fn in list(server_plugin_names) + local_functions:
+                    fn = str(fn)
+                    if fn and fn not in merged_functions:
+                        merged_functions.append(fn)
+
+                if (
+                    active_key
+                    and isinstance(self.config.get("Intent"), dict)
+                    and active_key in self.config["Intent"]
+                    and isinstance(self.config["Intent"].get(active_key), dict)
+                ):
+                    self.config["Intent"][active_key]["functions"] = merged_functions
+                elif active_key and isinstance(self.config.get("Intent"), dict):
+                    self.config["Intent"][active_key] = {"functions": merged_functions}
         if private_config.get("prompt", None) is not None:
             self.config["prompt"] = private_config["prompt"]
         # 获取声纹信息
@@ -793,6 +873,19 @@ class ConnectionHandler:
 
         """加载统一工具处理器"""
         self.func_handler = UnifiedToolHandler(self)
+        try:
+            intent_key = self.config.get("selected_module", {}).get("Intent")
+            intent_key = str(intent_key or "").strip()
+            fns = (
+                (self.config.get("Intent", {}) or {})
+                .get(intent_key, {})
+                .get("functions", [])
+            )
+            self.logger.bind(tag=TAG).info(
+                f"Intent functions configured: intent={intent_key}, functions={fns}"
+            )
+        except Exception:
+            pass
 
         # 异步初始化工具处理器
         if hasattr(self, "loop") and self.loop:

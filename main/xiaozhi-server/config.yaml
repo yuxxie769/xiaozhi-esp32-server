@@ -263,6 +263,8 @@ Intent:
       # - search_from_ragflow
       # - get_news_from_chinanews
       - get_news_from_newsnow
+      # 视觉事件确认（依赖 MCP 接入点的 vision_assistant；不可用时不会出现在 tool list）
+      # - confirm_event
       # play_music是服务器自带的音乐播放，hass_play_music是通过home assistant控制的独立外部程序音乐播放
       # 如果用了hass_play_music，就不要开启play_music，两者只留一个
       - play_music

@@ -191,6 +191,9 @@ class WebSocketServer:
                 old_plugins = (
                     (self.config.get("plugins") or {}) if isinstance(self.config, dict) else {}
                 )
+                old_intent = (
+                    (self.config.get("Intent") or {}) if isinstance(self.config, dict) else {}
+                )
                 # 重新获取配置（使用异步版本）
                 new_config = await get_config_from_api_async(self.config)
                 if new_config is None:
@@ -205,14 +208,48 @@ class WebSocketServer:
                 )
                 # 更新配置
                 self.config = new_config
-                # Preserve locally-added plugins across config refreshes (additive only).
+                # Preserve locally-added plugin keys across config refreshes (additive only).
                 if isinstance(old_plugins, dict) and old_plugins:
                     if not isinstance(self.config.get("plugins"), dict):
                         self.config["plugins"] = {}
+
+                    def _merge_missing(dst, src):
+                        if not isinstance(dst, dict) or not isinstance(src, dict):
+                            return dst
+                        for k, v in src.items():
+                            if k not in dst:
+                                dst[k] = v
+                                continue
+                            if isinstance(dst.get(k), dict) and isinstance(v, dict):
+                                _merge_missing(dst[k], v)
+                        return dst
+
                     for plugin_key, plugin_cfg in old_plugins.items():
-                        if plugin_key in self.config["plugins"]:
+                        if plugin_key not in self.config["plugins"]:
+                            self.config["plugins"][plugin_key] = plugin_cfg
                             continue
-                        self.config["plugins"][plugin_key] = plugin_cfg
+                        if isinstance(self.config["plugins"].get(plugin_key), dict) and isinstance(plugin_cfg, dict):
+                            _merge_missing(self.config["plugins"][plugin_key], plugin_cfg)
+
+                # Preserve locally-added Intent.functions across config refreshes (additive only).
+                if isinstance(old_intent, dict) and old_intent:
+                    if not isinstance(self.config.get("Intent"), dict):
+                        self.config["Intent"] = {}
+                    for intent_key, intent_cfg in old_intent.items():
+                        if not isinstance(intent_cfg, dict):
+                            continue
+                        local_functions = intent_cfg.get("functions")
+                        if not isinstance(local_functions, list) or not local_functions:
+                            continue
+                        if intent_key not in self.config["Intent"] or not isinstance(self.config["Intent"].get(intent_key), dict):
+                            self.config["Intent"][intent_key] = {}
+                        remote_functions = self.config["Intent"][intent_key].get("functions")
+                        if not isinstance(remote_functions, list):
+                            remote_functions = []
+                        for fn in local_functions:
+                            if fn and fn not in remote_functions:
+                                remote_functions.append(fn)
+                        self.config["Intent"][intent_key]["functions"] = remote_functions
                 # 重新初始化组件
                 modules = initialize_modules(
                     self.logger,
