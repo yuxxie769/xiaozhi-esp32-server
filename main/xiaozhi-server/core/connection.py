@@ -32,7 +32,7 @@ from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from plugins_func.loadplugins import auto_import_modules
-from plugins_func.register import Action
+from plugins_func.register import Action, ActionResponse
 from core.auth import AuthenticationError
 from config.config_loader import get_private_config_from_api
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
@@ -1263,12 +1263,38 @@ class ConnectionHandler:
                     f"检测到 {len(tool_calls_list)} 个工具调用"
                 )
 
-                # 收集所有工具调用的 Future
+                # 收集所有工具调用的 Future（对当前会话未暴露/不可用的工具，直接跳过执行并交给LLM兜底）
                 futures_with_data = []
+                tool_results = []
                 for tool_call_data in tool_calls_list:
                     self.logger.bind(tag=TAG).debug(
                         f"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}"
                     )
+
+                    try:
+                        if not self.func_handler.has_tool(tool_call_data["name"]):
+                            tool_results.append(
+                                (
+                                    ActionResponse(
+                                        action=Action.REQLLM,
+                                        result=json.dumps(
+                                            {
+                                                "ok": False,
+                                                "error": "tool_unavailable",
+                                                "tool": tool_call_data["name"],
+                                                "detail": "Tool is not available in this session. Continue without calling tools and do not mention this error to the user.",
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                        response=None,
+                                    ),
+                                    tool_call_data,
+                                )
+                            )
+                            continue
+                    except Exception:
+                        # 若工具可用性检测失败，回退为正常执行（由后续执行/错误处理兜底）。
+                        pass
 
                     future = asyncio.run_coroutine_threadsafe(
                         self.func_handler.handle_llm_function_call(
@@ -1279,7 +1305,6 @@ class ConnectionHandler:
                     futures_with_data.append((future, tool_call_data))
 
                 # 等待协程结束（实际等待时长为最慢的那个）
-                tool_results = []
                 for future, tool_call_data in futures_with_data:
                     result = future.result()
                     tool_results.append((result, tool_call_data))
@@ -1339,17 +1364,54 @@ class ConnectionHandler:
         need_llm_tools = []
 
         for result, tool_call_data in tool_results:
-            if result.action in [
-                Action.RESPONSE,
-                Action.NOTFOUND,
-                Action.ERROR,
-            ]:  # 直接回复前端
+            if result is None:
+                result = ActionResponse(
+                    action=Action.REQLLM,
+                    result=json.dumps(
+                        {
+                            "ok": False,
+                            "error": "tool_call_failed",
+                            "tool": tool_call_data.get("name"),
+                            "detail": "Tool call returned no result. Continue without calling tools and do not mention this error to the user.",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    response=None,
+                )
+
+            if result.action == Action.RESPONSE:  # 直接回复前端
                 text = result.response if result.response else result.result
                 self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
                 # 收集需要 LLM 处理的工具
                 need_llm_tools.append((result, tool_call_data))
+            elif result.action in [Action.NOTFOUND, Action.ERROR]:
+                # 工具不可用/执行失败：不要把异常/“工具不存在”直接播报给用户，交给LLM自然续写兜底。
+                err_text = result.response if result.response else result.result
+                need_llm_tools.append(
+                    (
+                        ActionResponse(
+                            action=Action.REQLLM,
+                            result=json.dumps(
+                                {
+                                    "ok": False,
+                                    "error": (
+                                        "tool_not_found"
+                                        if result.action == Action.NOTFOUND
+                                        else "tool_error"
+                                    ),
+                                    "tool": tool_call_data.get("name"),
+                                    "detail": str(err_text or ""),
+                                    "hint": "Continue without calling tools and do not mention this error to the user.",
+                                },
+                                ensure_ascii=False,
+                            ),
+                            response=None,
+                        ),
+                        tool_call_data,
+                    )
+                )
             else:
                 pass
 
