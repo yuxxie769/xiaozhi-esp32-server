@@ -20,5 +20,5 @@ class BaseHandler:
         response = web.Response(body=b"", content_type="text/plain")
         self._add_cors_headers(response)
         # 添加允许的方法
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         return response

@@ -382,7 +382,7 @@ async def run_confirm_event(
     *,
     tool_name: str = DEFAULT_VISION_TOOL_NAME,
     timeout_seconds: float = 10.0,
-    retries: int = 1,
+    retries: int = 2,
 ) -> dict[str, Any]:
     spec = EVENT_SPECS.get(str(event))
     if not spec:
@@ -485,9 +485,9 @@ async def confirm_event(conn, event: str):
     except Exception:
         timeout_seconds = 10.0
     try:
-        retries = int(cfg.get("retries", 1))
+        retries = int(cfg.get("retries", 2))
     except Exception:
-        retries = 1
+        retries = 2
 
     result = await run_confirm_event(
         conn,

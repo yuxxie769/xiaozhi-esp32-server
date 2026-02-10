@@ -3,6 +3,7 @@ from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
+from core.api.task_handler import TaskApiHandler
 
 TAG = __name__
 
@@ -13,6 +14,7 @@ class SimpleHttpServer:
         self.logger = setup_logging()
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
+        self.task_handler = TaskApiHandler(config)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -72,6 +74,36 @@ class SimpleHttpServer:
                         web.options(
                             "/mcp/vision/explain", self.vision_handler.handle_options
                         ),
+                        # Task engine debug APIs (no auth in MVP)
+                        web.get("/tasks", self.task_handler.handle_list),
+                        web.post("/tasks", self.task_handler.handle_upsert),
+                        web.options("/tasks", self.task_handler.handle_options),
+                        web.get("/tasks/{account_id}/all", self.task_handler.handle_list_account),
+                        web.get("/tasks/{account_id}/instances", self.task_handler.handle_list_instances),
+                        web.get("/tasks/{account_id}/{task_type}", self.task_handler.handle_get),
+                        web.post(
+                            "/tasks/{account_id}/{task_type}/kickoff",
+                            self.task_handler.handle_kickoff,
+                        ),
+                        web.post("/tasks/{account_id}/{task_type}/run", self.task_handler.handle_run),
+                        web.post("/tasks/{account_id}/{task_type}/pause", self.task_handler.handle_pause),
+                        web.post("/tasks/{account_id}/{task_type}/cancel", self.task_handler.handle_cancel),
+                        web.get(
+                            "/tasks/{account_id}/{task_type}/attempts",
+                            self.task_handler.handle_attempts,
+                        ),
+                        web.delete(
+                            "/tasks/{account_id}/{task_type}/instances/{instance_key}",
+                            self.task_handler.handle_delete_instance,
+                        ),
+
+                        # Legacy endpoints: require ?task_type=... to avoid ambiguous defaults.
+                        web.get("/tasks/{account_id}", self.task_handler.handle_get),
+                        web.post("/tasks/{account_id}/kickoff", self.task_handler.handle_kickoff),
+                        web.post("/tasks/{account_id}/run", self.task_handler.handle_run),
+                        web.post("/tasks/{account_id}/pause", self.task_handler.handle_pause),
+                        web.post("/tasks/{account_id}/cancel", self.task_handler.handle_cancel),
+                        web.get("/tasks/{account_id}/attempts", self.task_handler.handle_attempts),
                     ]
                 )
 
