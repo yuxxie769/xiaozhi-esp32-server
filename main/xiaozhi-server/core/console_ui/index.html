@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ASSIST CONTROL BOARD</title>
+    <link rel="stylesheet" href="/console/static/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand__title">ASSIST CONTROL BOARD</div>
+          <div class="brand__sub">task engine • debug ui</div>
+        </div>
+
+        <div class="topbar__tools">
+          <label class="field field--inline">
+            <span class="field__label">API Base</span>
+            <input id="baseUrl" class="input" spellcheck="false" />
+          </label>
+          <button id="saveBaseUrl" class="btn btn--primary">Save</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <div class="sidebar__title">MODULES</div>
+          <nav class="nav">
+            <button class="nav__item nav__item--active" data-view="taskEngine">
+              Task Engine
+            </button>
+            <button class="nav__item" data-view="settings" disabled>
+              Settings (soon)
+            </button>
+          </nav>
+          <div class="sidebar__hint">
+            Tip: this UI only talks to HTTP APIs (no direct import), so it can host other
+            modules later.
+          </div>
+        </aside>
+
+        <section class="content">
+          <div id="view"></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span class="footer__left">retro-future • cassette • pixel • orange</span>
+        <span class="footer__right" id="status">ready</span>
+      </footer>
+    </div>
+
+    <script type="module" src="/console/static/app.js"></script>
+  </body>
+</html>

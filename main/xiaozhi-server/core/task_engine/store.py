@@ -187,6 +187,18 @@ class TaskStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def delete_task(self, *, account_id: str, task_type: str) -> int:
+        account_id = str(account_id or "").strip()
+        task_type = str(task_type or "").strip()
+        if not account_id or not task_type:
+            raise ValueError("account_id/task_type required")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE account_id=? AND task_type=?",
+                (account_id, task_type),
+            )
+            return int(cur.rowcount or 0)
+
     def list_tasks(self, *, limit: int = 200) -> list[dict[str, Any]]:
         limit = max(1, int(limit))
         with self._connect() as conn:
@@ -396,6 +408,31 @@ class TaskStore:
                 LIMIT ?
                 """.strip(),
                 (int(now_ms), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_attempts_by_account_task(
+        self, *, account_id: str, task_type: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        account_id = str(account_id or "").strip()
+        task_type = str(task_type or "").strip()
+        limit = max(1, int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  a.*,
+                  i.instance_key AS instance_key,
+                  i.status AS instance_status,
+                  i.planned_at_ms AS planned_at_ms
+                FROM task_attempts a
+                JOIN task_instances i
+                  ON i.instance_id = a.instance_id
+                WHERE i.account_id=? AND i.task_type=?
+                ORDER BY a.at_ms DESC
+                LIMIT ?
+                """.strip(),
+                (account_id, task_type, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

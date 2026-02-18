@@ -1,9 +1,11 @@
 import asyncio
+from pathlib import Path
 from aiohttp import web
 from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
 from core.api.task_handler import TaskApiHandler
+from core.console_ui.handler import ConsoleUiHandler
 
 TAG = __name__
 
@@ -15,6 +17,7 @@ class SimpleHttpServer:
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
         self.task_handler = TaskApiHandler(config)
+        self.console_ui = ConsoleUiHandler()
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
         """获取websocket地址
@@ -67,6 +70,10 @@ class SimpleHttpServer:
                 # 添加路由
                 app.add_routes(
                     [
+                        # Console UI (static, no auth) - decoupled from task engine internals.
+                        web.get("/console", self.console_ui.handle_redirect),
+                        web.get("/console/", self.console_ui.handle_index),
+
                         web.get("/mcp/vision/explain", self.vision_handler.handle_get),
                         web.post(
                             "/mcp/vision/explain", self.vision_handler.handle_post
@@ -81,6 +88,7 @@ class SimpleHttpServer:
                         web.get("/tasks/{account_id}/all", self.task_handler.handle_list_account),
                         web.get("/tasks/{account_id}/instances", self.task_handler.handle_list_instances),
                         web.get("/tasks/{account_id}/{task_type}", self.task_handler.handle_get),
+                        web.delete("/tasks/{account_id}/{task_type}", self.task_handler.handle_delete_task),
                         web.post(
                             "/tasks/{account_id}/{task_type}/kickoff",
                             self.task_handler.handle_kickoff,
@@ -105,6 +113,13 @@ class SimpleHttpServer:
                         web.post("/tasks/{account_id}/cancel", self.task_handler.handle_cancel),
                         web.get("/tasks/{account_id}/attempts", self.task_handler.handle_attempts),
                     ]
+                )
+
+                console_dir = Path(__file__).resolve().parent / "console_ui"
+                app.router.add_static(
+                    "/console/static/",
+                    path=str(console_dir),
+                    show_index=False,
                 )
 
                 # 运行服务
