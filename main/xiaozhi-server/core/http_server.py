@@ -6,6 +6,7 @@ from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
 from core.api.task_handler import TaskApiHandler
 from core.console_ui.handler import ConsoleUiHandler
+from core.utils.util import get_local_ip
 
 TAG = __name__
 
@@ -127,6 +128,26 @@ class SimpleHttpServer:
                 await runner.setup()
                 site = web.TCPSite(runner, host, port)
                 await site.start()
+
+                try:
+                    urls = []
+                    if host in ("0.0.0.0", "::"):
+                        urls.append(f"http://127.0.0.1:{port}/console/")
+                        local_ip = ""
+                        try:
+                            local_ip = str(get_local_ip() or "").strip()
+                        except Exception:
+                            local_ip = ""
+                        if local_ip:
+                            urls.append(f"http://{local_ip}:{port}/console/")
+                    else:
+                        urls.append(f"http://{host}:{port}/console/")
+
+                    self.logger.bind(tag=TAG).info(
+                        f"ASSIST CONTROL BOARD UI: {', '.join(urls)}"
+                    )
+                except Exception:
+                    pass
 
                 # 保持服务运行
                 while True:

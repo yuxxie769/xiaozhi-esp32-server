@@ -897,15 +897,6 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
 
     def chat(self, query, depth=0):
-        if query is not None:
-            q = str(query)
-            if len(q) > 400:
-                self.logger.bind(tag=TAG).info(
-                    f"大模型收到用户消息: {q[:400]}...(len={len(q)})"
-                )
-            else:
-                self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {q}")
-
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
             self.llm_finish_task = False
@@ -959,6 +950,10 @@ class ConnectionHandler:
             llm_debug_cfg.get("log_response", False)
             or os.getenv("XIAOZHI_LOG_LLM_RESPONSE") == "1"
         )
+        log_llm_user_prompt = bool(
+            llm_debug_cfg.get("log_user_prompt", False)
+            or os.getenv("XIAOZHI_LOG_LLM_USER_PROMPT") == "1"
+        )
         log_llm_include_nested = bool(
             llm_debug_cfg.get("include_nested", False)
             or os.getenv("XIAOZHI_LOG_LLM_NESTED") == "1"
@@ -968,6 +963,42 @@ class ConnectionHandler:
         except Exception:
             log_llm_max_chars = 8000
         enable_llm_logging_this_call = depth == 0 or log_llm_include_nested
+
+        if enable_llm_logging_this_call and log_llm_user_prompt:
+            try:
+                user_prompt = ""
+                try:
+                    for m in reversed(getattr(self.dialogue, "dialogue", []) or []):
+                        if getattr(m, "role", None) != "user":
+                            continue
+                        content = getattr(m, "content", "")
+                        if isinstance(content, str):
+                            user_prompt = content
+                        else:
+                            try:
+                                user_prompt = json.dumps(content, ensure_ascii=False)
+                            except Exception:
+                                user_prompt = str(content)
+                        break
+                except Exception:
+                    pass
+
+                user_prompt_preview = user_prompt
+                user_prompt_truncated = False
+                if user_prompt_preview and len(user_prompt_preview) > log_llm_max_chars:
+                    user_prompt_preview = user_prompt_preview[:log_llm_max_chars]
+                    user_prompt_truncated = True
+
+                self.logger.bind(tag=TAG).info(
+                    f"LLM请求-user prompt(depth={depth}) device={self.device_id}, session={self.session_id}, "
+                    f"user_prompt_truncated={user_prompt_truncated}"
+                )
+                if user_prompt_preview:
+                    self.logger.bind(tag=TAG).info(
+                        f"LLM请求-最终user prompt(depth={depth}): {user_prompt_preview}"
+                    )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"LLM user prompt日志打印失败: {e}")
 
         try:
             # 使用带记忆的对话
@@ -983,46 +1014,52 @@ class ConnectionHandler:
             )
             if enable_llm_logging_this_call and log_llm_request:
                 try:
-                    tool_names = []
-                    if functions and isinstance(functions, list):
-                        for tool in functions:
-                            if not isinstance(tool, dict):
-                                continue
-                            func = tool.get("function", {}) if isinstance(tool, dict) else {}
-                            name = func.get("name") if isinstance(func, dict) else None
-                            if name:
-                                tool_names.append(name)
-                    tools_preview = tool_names[:50]
-                    tools_suffix = "" if len(tool_names) <= 50 else f"...(+{len(tool_names) - 50})"
-                    system_prompt = ""
-                    for m in llm_dialogue:
-                        if isinstance(m, dict) and m.get("role") == "system":
-                            system_prompt = str(m.get("content", ""))
-                            break
-                    system_prompt_preview = system_prompt
-                    truncated = False
-                    if system_prompt_preview and len(system_prompt_preview) > log_llm_max_chars:
-                        system_prompt_preview = system_prompt_preview[:log_llm_max_chars]
-                        truncated = True
-                    self.logger.bind(tag=TAG).info(
-                        f"LLM请求(depth={depth}) device={self.device_id}, session={self.session_id}, "
-                        f"messages={len(llm_dialogue)}, memory_len={0 if memory_str is None else len(str(memory_str))}, "
-                        f"tools={len(tool_names)} {tools_preview}{tools_suffix}, system_prompt_truncated={truncated}"
-                    )
-                    if system_prompt_preview:
+                    if log_llm_request:
+                        tool_names = []
+                        if functions and isinstance(functions, list):
+                            for tool in functions:
+                                if not isinstance(tool, dict):
+                                    continue
+                                func = tool.get("function", {}) if isinstance(tool, dict) else {}
+                                name = func.get("name") if isinstance(func, dict) else None
+                                if name:
+                                    tool_names.append(name)
+                        tools_preview = tool_names[:50]
+                        tools_suffix = "" if len(tool_names) <= 50 else f"...(+{len(tool_names) - 50})"
+                        system_prompt = ""
+                        for m in llm_dialogue:
+                            if isinstance(m, dict) and m.get("role") == "system":
+                                system_prompt = str(m.get("content", ""))
+                                break
+                        system_prompt_preview = system_prompt
+                        system_prompt_truncated = False
+                        if (
+                            system_prompt_preview
+                            and len(system_prompt_preview) > log_llm_max_chars
+                        ):
+                            system_prompt_preview = system_prompt_preview[:log_llm_max_chars]
+                            system_prompt_truncated = True
+
                         self.logger.bind(tag=TAG).info(
-                            f"LLM请求-最终system prompt(depth={depth}): {system_prompt_preview}"
+                            f"LLM请求(depth={depth}) device={self.device_id}, session={self.session_id}, "
+                            f"messages={len(llm_dialogue)}, memory_len={0 if memory_str is None else len(str(memory_str))}, "
+                            f"tools={len(tool_names)} {tools_preview}{tools_suffix}, "
+                            f"system_prompt_truncated={system_prompt_truncated}"
                         )
-                    try:
-                        messages_json = json.dumps(llm_dialogue, ensure_ascii=False)
-                        if len(messages_json) > log_llm_max_chars:
-                            messages_json = messages_json[:log_llm_max_chars]
-                            messages_json += "...(truncated)"
-                        self.logger.bind(tag=TAG).info(
-                            f"LLM请求-最终messages JSON(depth={depth}): {messages_json}"
-                        )
-                    except Exception:
-                        pass
+                        if system_prompt_preview:
+                            self.logger.bind(tag=TAG).info(
+                                f"LLM请求-最终system prompt(depth={depth}): {system_prompt_preview}"
+                            )
+                        try:
+                            messages_json = json.dumps(llm_dialogue, ensure_ascii=False)
+                            if len(messages_json) > log_llm_max_chars:
+                                messages_json = messages_json[:log_llm_max_chars]
+                                messages_json += "...(truncated)"
+                            self.logger.bind(tag=TAG).info(
+                                f"LLM请求-最终messages JSON(depth={depth}): {messages_json}"
+                            )
+                        except Exception:
+                            pass
                 except Exception as e:
                     self.logger.bind(tag=TAG).warning(f"LLM请求日志打印失败: {e}")
 
@@ -1308,6 +1345,69 @@ class ConnectionHandler:
                 for future, tool_call_data in futures_with_data:
                     result = future.result()
                     tool_results.append((result, tool_call_data))
+
+                if (
+                    enable_llm_logging_this_call
+                    and log_llm_response
+                    and tool_results
+                ):
+                    try:
+                        tool_responses_preview = []
+                        for result, tool_call_data in tool_results[:10]:
+                            action_name = ""
+                            result_text = ""
+                            response_text = ""
+                            if result is not None:
+                                action = getattr(result, "action", None)
+                                action_name = (
+                                    action.name if hasattr(action, "name") else str(action or "")
+                                )
+
+                                raw_result = getattr(result, "result", None)
+                                if raw_result is not None:
+                                    if isinstance(raw_result, str):
+                                        result_text = raw_result
+                                    else:
+                                        try:
+                                            result_text = json.dumps(raw_result, ensure_ascii=False)
+                                        except Exception:
+                                            result_text = str(raw_result)
+
+                                raw_response = getattr(result, "response", None)
+                                if raw_response is not None:
+                                    if isinstance(raw_response, str):
+                                        response_text = raw_response
+                                    else:
+                                        try:
+                                            response_text = json.dumps(raw_response, ensure_ascii=False)
+                                        except Exception:
+                                            response_text = str(raw_response)
+
+                            if len(result_text) > 2000:
+                                result_text = result_text[:2000] + "...(truncated)"
+                            if len(response_text) > 2000:
+                                response_text = response_text[:2000] + "...(truncated)"
+
+                            tool_responses_preview.append(
+                                {
+                                    "id": tool_call_data.get("id", ""),
+                                    "name": tool_call_data.get("name", ""),
+                                    "action": action_name,
+                                    "result": result_text,
+                                    "response": response_text,
+                                }
+                            )
+                        tool_responses_suffix = (
+                            ""
+                            if len(tool_results) <= 10
+                            else f"...(+{len(tool_results) - 10})"
+                        )
+                        self.logger.bind(tag=TAG).info(
+                            f"LLM原生输出-工具响应(depth={depth}): "
+                            f"{json.dumps(tool_responses_preview, ensure_ascii=False)}{tool_responses_suffix}"
+                        )
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(f"LLM工具响应日志打印失败: {e}")
 
                 # 统一处理所有工具调用结果
                 if tool_results:

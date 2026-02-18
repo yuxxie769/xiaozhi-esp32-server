@@ -305,6 +305,11 @@ async def scheduled_greeting_service(server: Any) -> None:
                                 f"定点报时触发(task_engine): slot={slot_to_fire}, device={device_id}, account={account_id}"
                             )
                             continue
+                        logger.bind(tag=TAG).warning(
+                            f"定点报时回退到保底问候: reason=task_engine_kickoff_failed, "
+                            f"slot={slot_to_fire}, device={device_id}, account={account_id}, "
+                            f"planned_time={planned_time}, planned_at_ms={planned_at_ms}"
+                        )
                         extra_context = await _maybe_wake_check(conn, cfg.wake_check)
                     prompt = build_greeting_style_prompt(
                         slot=slot_to_fire,
