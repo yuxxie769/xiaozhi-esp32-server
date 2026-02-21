@@ -11,7 +11,26 @@ class StateHubApiHandler(BaseHandler):
     async def handle_view(self, request: web.Request) -> web.StreamResponse:
         hub = get_state_hub()
         if not hub:
-            resp = web.json_response({"success": True, "data": {"connected": False, "outdated": True, "age_s": None, "highlight": [], "rev": 0, "conn_state": "DISCONNECTED"}})
+            resp = web.json_response(
+                {
+                    "success": True,
+                    "data": {
+                        "connected": False,
+                        "outdated": True,
+                        "age_s": None,
+                        "highlight": [],
+                        "rev": 0,
+                        "conn_state": "DISCONNECTED",
+                        "event_bus": {
+                            "entity_id": "",
+                            "events_seen": 0,
+                            "last_event_id": "",
+                            "last_event_at_ms": 0,
+                            "last_content": "",
+                        },
+                    },
+                }
+            )
             self._add_cors_headers(resp)
             return resp
 
@@ -33,6 +52,13 @@ class StateHubApiHandler(BaseHandler):
                         "items": [],
                         "rev": 0,
                         "conn_state": "DISCONNECTED",
+                        "event_bus": {
+                            "entity_id": "",
+                            "events_seen": 0,
+                            "last_event_id": "",
+                            "last_event_at_ms": 0,
+                            "last_content": "",
+                        },
                     },
                 }
             )
@@ -47,7 +73,22 @@ class StateHubApiHandler(BaseHandler):
     async def handle_status(self, request: web.Request) -> web.StreamResponse:
         hub = get_state_hub()
         if not hub:
-            data = {"connected": False, "conn_state": "DISCONNECTED", "outdated": True, "age_s": None, "rev": 0, "allowlist_size": 0, "last_error": ""}
+            data = {
+                "connected": False,
+                "conn_state": "DISCONNECTED",
+                "outdated": True,
+                "age_s": None,
+                "rev": 0,
+                "allowlist_size": 0,
+                "last_error": "",
+                "event_bus": {
+                    "entity_id": "",
+                    "events_seen": 0,
+                    "last_event_id": "",
+                    "last_event_at_ms": 0,
+                    "last_content": "",
+                },
+            }
         else:
             v = hub.view_highlight()
             with hub.store._lock:
@@ -60,6 +101,7 @@ class StateHubApiHandler(BaseHandler):
                 "rev": v.get("rev", 0),
                 "allowlist_size": allowlist_size,
                 "last_error": v.get("last_error", ""),
+                "event_bus": (v.get("event_bus") or {}),
             }
         resp = web.json_response({"success": True, "data": data}, dumps=lambda o: json.dumps(o, ensure_ascii=False))
         self._add_cors_headers(resp)

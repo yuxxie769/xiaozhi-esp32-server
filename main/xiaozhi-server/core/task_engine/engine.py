@@ -13,6 +13,7 @@ from .store import TaskStore
 
 # Ensure handlers are registered.
 from .handlers import wake_up as _wake_up_handler  # noqa: F401
+from .handlers import ha_event as _ha_event_handler  # noqa: F401
 
 TAG = __name__
 logger = setup_logging()
@@ -222,8 +223,12 @@ async def run_instance_row(server: Any, store: TaskStore, row: dict[str, Any], *
     if not nudge_prompt or decision_code not in ("retry", "complete"):
         return
 
-    policy = _parse_policy(task.get("policy_json"))
-    device_id = str(policy.get("device_id") or "").strip()
+    chat_device_id = str((decision_json or {}).get("chat_device_id") or "").strip()
+    if chat_device_id:
+        device_id = chat_device_id
+    else:
+        policy = _parse_policy(task.get("policy_json"))
+        device_id = str(policy.get("device_id") or "").strip()
     conn = (getattr(server, "active_connections_by_device", {}) or {}).get(device_id)
     if not _can_chat(conn):
         return

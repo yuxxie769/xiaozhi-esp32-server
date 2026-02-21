@@ -167,10 +167,6 @@ async def expect_reply_followup_service(server: Any) -> None:
                 if not getattr(conn, "expect_user_reply", False):
                     pending.pop(conn_id, None)
                     continue
-                # 仅对“用户参与过的会话”启用跟进：避免定时播报等服务端触发误入跟进流程。
-                if float(getattr(conn, "last_user_activity_time", 0.0) or 0.0) <= 0.0:
-                    pending.pop(conn_id, None)
-                    continue
 
                 if sent_count.get(conn_id, 0) >= cfg.max_per_session:
                     pending.pop(conn_id, None)

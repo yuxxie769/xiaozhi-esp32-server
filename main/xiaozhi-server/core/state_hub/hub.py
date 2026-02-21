@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import random
 import time
@@ -13,6 +15,7 @@ from .client import HaWsClient
 from .exposure import ExposureStore
 from .store import StateHubStore
 from .summary import ClipRules, build_entity_rows, build_highlight, build_local_summary_text
+from core.task_engine.facade import kickoff_ha_event_from_state_hub
 
 TAG = __name__
 
@@ -74,6 +77,28 @@ class StateHub:
     def _rules(self, cfg: Dict[str, Any]) -> ClipRules:
         return ClipRules(cfg)
 
+    def _route2_cfg(self, cfg: Dict[str, Any]) -> tuple[bool, str]:
+        route2 = cfg.get("route2", {}) if isinstance(cfg.get("route2", {}), dict) else {}
+        enabled = bool(route2.get("enabled", False))
+        eid = str(route2.get("event_bus_entity_id", "input_text.xiaozhi_event_bus") or "input_text.xiaozhi_event_bus")
+        eid = eid.strip()
+        return enabled, eid
+
+    def _inject_route2_entity(self, allowlist: list[str], *, enabled: bool, entity_id: str) -> list[str]:
+        if not enabled:
+            return list(allowlist or [])
+        eid = str(entity_id or "").strip()
+        if not eid:
+            return list(allowlist or [])
+        out: list[str] = []
+        for x in list(allowlist or []):
+            s = str(x or "").strip()
+            if s and s not in out:
+                out.append(s)
+        if eid not in out:
+            out.append(eid)
+        return out
+
     def view_highlight(self) -> Dict[str, Any]:
         cfg = self._cfg()
         outdated_after = int(cfg.get("outdated_after_seconds", 60) or 60)
@@ -96,6 +121,7 @@ class StateHub:
             "rev": self.store.rev,
             "conn_state": self.store.conn_state,
             "last_error": self.store.last_error,
+            "event_bus": self.store.event_bus_snapshot(),
         }
 
     def view_entities(self) -> Dict[str, Any]:
@@ -115,6 +141,7 @@ class StateHub:
             "rev": self.store.rev,
             "conn_state": self.store.conn_state,
             "last_error": self.store.last_error,
+            "event_bus": self.store.event_bus_snapshot(),
         }
 
     def local_summary_text(self) -> str:
@@ -149,6 +176,9 @@ class StateHub:
                 await asyncio.sleep(1.0)
                 continue
 
+            route2_enabled, event_bus_eid = self._route2_cfg(cfg)
+            self.store.set_event_bus_entity_id(event_bus_eid if route2_enabled else "")
+
             ha_url = str(cfg.get("ha_ws_url", "") or "").strip()
             token = str(cfg.get("access_token", "") or "").strip()
             target = cfg.get("target", {}) if isinstance(cfg.get("target", {}), dict) else {}
@@ -177,7 +207,8 @@ class StateHub:
 
                 # Extract allowlist
                 self._force_refresh.clear()
-                allowlist = await self._extract_allowlist(client, target)
+                extracted = await self._extract_allowlist(client, target)
+                allowlist = self._inject_route2_entity(extracted, enabled=route2_enabled, entity_id=event_bus_eid)
                 self.store.set_target_and_allowlist(target, allowlist)
                 self._mark_dirty()
 
@@ -195,7 +226,8 @@ class StateHub:
                     if self._force_refresh.is_set() or (now - last_refresh_at) >= refresh_target_seconds:
                         self._force_refresh.clear()
                         last_refresh_at = now
-                        new_allowlist = await self._extract_allowlist(client, target)
+                        extracted2 = await self._extract_allowlist(client, target)
+                        new_allowlist = self._inject_route2_entity(extracted2, enabled=route2_enabled, entity_id=event_bus_eid)
                         if set(new_allowlist) != set(allowlist):
                             raise RuntimeError("allowlist_changed")
 
@@ -217,6 +249,12 @@ class StateHub:
                         if isinstance(event.get("a"), dict):
                             dirty = self.store.apply_snapshot_added(event.get("a")) or dirty
                         if isinstance(event.get("c"), dict):
+                            if route2_enabled:
+                                try:
+                                    dirty = (await self._maybe_route2_handle_changed(event.get("c"), event_bus_eid)) or dirty
+                                except Exception:
+                                    # Route2 should be silent on normal errors (bad payload, etc.).
+                                    pass
                             dirty = self.store.apply_changed(event.get("c")) or dirty
                         if "r" in event:
                             dirty = self.store.apply_removed(event.get("r")) or dirty
@@ -236,6 +274,82 @@ class StateHub:
                 sleep_s = min(30.0, backoff) + random.random() * 0.5
                 await asyncio.sleep(sleep_s)
                 backoff = min(30.0, backoff * 2.0)
+
+    async def _maybe_route2_handle_changed(self, changed_payload: Dict[str, Any], event_bus_eid: str) -> bool:
+        eid = str(event_bus_eid or "").strip()
+        if not eid or not isinstance(changed_payload, dict):
+            return False
+        diff = changed_payload.get(eid)
+        if not isinstance(diff, dict):
+            return False
+
+        plus = diff.get("+") if isinstance(diff.get("+"), dict) else None
+        src = plus if isinstance(plus, dict) else diff
+
+        s = src.get("s")
+        if not isinstance(s, str):
+            return False
+        s = s.strip()
+        if not s:
+            return False
+
+        try:
+            obj = json.loads(s)
+        except Exception:
+            return False
+        if not isinstance(obj, dict) or obj == {}:
+            return False
+
+        title = str(obj.get("title") or "").strip()
+        instruction = str(obj.get("instruction") or "").strip()
+        if not title or not instruction:
+            return False
+        data = obj.get("data", None)
+
+        event_id = ""
+        c_raw = src.get("c")
+        if isinstance(c_raw, dict):
+            c_meta = c_raw
+            event_id = str(c_meta.get("id") or "").strip()
+        elif isinstance(c_raw, str):
+            event_id = str(c_raw or "").strip()
+        if not event_id:
+            lc = src.get("lc")
+            try:
+                norm = {"title": title, "instruction": instruction, "data": data}
+                norm_s = json.dumps(norm, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                seed = f"{norm_s}:{lc}"
+                event_id = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+            except Exception:
+                return False
+
+        now_ms = int(time.time() * 1000)
+        content_text = json.dumps(
+            {"title": title, "instruction": instruction, "data": data},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        changed = self.store.mark_event_bus_event(
+            entity_id=eid,
+            event_id=event_id,
+            at_ms=now_ms,
+            content=content_text,
+        )
+        if not changed:
+            return False
+        try:
+            await kickoff_ha_event_from_state_hub(
+                self.server,
+                event_id=event_id,
+                title=title,
+                instruction=instruction,
+                data=data,
+                now_ms=now_ms,
+            )
+        except Exception:
+            # Silent: UI pulse should still work even if task engine is disabled/misconfigured.
+            pass
+        return True
 
     async def _extract_allowlist(self, client: HaWsClient, target: Dict[str, Any]) -> list[str]:
         msg = await client.request("extract_from_target", {"target": target}, timeout=10.0)

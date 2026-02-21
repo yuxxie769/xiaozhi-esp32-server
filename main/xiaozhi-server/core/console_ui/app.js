@@ -939,6 +939,15 @@ function renderStateHub(state) {
     </div>
 
     <div class="panel">
+      <h2 class="panel__title">EVENT BUS</h2>
+      <div class="row" style="margin-top:8px;align-items:center;">
+        <span class="pill"><span class="mono">entity_id</span>: <span class="mono" id="eventBusEid">-</span></span>
+        <span class="eventDot" id="eventBusDot" title="New event"></span>
+      </div>
+      <div class="pill mono eventBusPayload" id="eventBusPayload" style="margin-top:10px;">-</div>
+    </div>
+
+    <div class="panel">
       <h2 class="panel__title">ENTITIES</h2>
       <div style="margin-top:12px;overflow:auto;">
         <table class="table" id="hubTable">
@@ -1007,12 +1016,16 @@ function renderStateHub(state) {
   const connEl = $("#hubConn");
   const outdatedEl = $("#hubOutdated");
   const errEl = $("#hubErr");
+  const eventBusEidEl = $("#eventBusEid");
+  const eventBusDotEl = $("#eventBusDot");
+  const eventBusPayloadEl = $("#eventBusPayload");
   const tbody = $("#hubTable tbody");
   const helpModalEl = $("#hubHelpModal");
 
   let timer = null;
   let lastRev = null;
   let inflight = false;
+  let lastEventId = null;
 
   function setErr(text) {
     const t = String(text || "").trim();
@@ -1046,6 +1059,27 @@ function renderStateHub(state) {
       outdatedEl.classList.toggle("pill--ok", !outdated);
 
       setErr(v.last_error || "");
+
+      const eb = (v && v.event_bus) || {};
+      const ebEid = String(eb.entity_id || "").trim();
+      eventBusEidEl.textContent = ebEid || "(disabled)";
+      const ebContent = String(eb.last_content || "").trim();
+      eventBusPayloadEl.textContent = ebContent || "-";
+      const nextEventId = String(eb.last_event_id || "").trim();
+      if (lastEventId === null) {
+        lastEventId = nextEventId || "";
+      } else if (nextEventId && nextEventId !== lastEventId) {
+        lastEventId = nextEventId;
+        try {
+          eventBusDotEl.classList.remove("eventDot--pulse");
+          // retrigger animation
+          void eventBusDotEl.offsetWidth;
+          eventBusDotEl.classList.add("eventDot--pulse");
+          setTimeout(() => {
+            try { eventBusDotEl.classList.remove("eventDot--pulse"); } catch {}
+          }, 1800);
+        } catch {}
+      }
 
       if (lastRev !== v.rev) {
         lastRev = v.rev;

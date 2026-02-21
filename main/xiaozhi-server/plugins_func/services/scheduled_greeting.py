@@ -146,6 +146,35 @@ def _account_key(conn) -> str:
     )
 
 
+async def _ensure_tts_workers(conn) -> bool:
+    tts = getattr(conn, "tts", None)
+    if not tts:
+        return False
+    try:
+        text_thread = getattr(tts, "tts_priority_thread", None)
+        audio_thread = getattr(tts, "audio_play_priority_thread", None)
+        text_alive = bool(text_thread and text_thread.is_alive())
+        audio_alive = bool(audio_thread and audio_thread.is_alive())
+        if text_alive and audio_alive:
+            return True
+        logger.bind(tag=TAG).warning(
+            f"定点报时检测到TTS线程异常，尝试重启: device={getattr(conn, 'device_id', '')}, "
+            f"text_alive={text_alive}, audio_alive={audio_alive}"
+        )
+        await tts.open_audio_channels(conn)
+        text_thread = getattr(tts, "tts_priority_thread", None)
+        audio_thread = getattr(tts, "audio_play_priority_thread", None)
+        return bool(
+            text_thread
+            and audio_thread
+            and text_thread.is_alive()
+            and audio_thread.is_alive()
+        )
+    except Exception as e:
+        logger.bind(tag=TAG).warning(f"定点报时重启TTS线程失败: {e}")
+        return False
+
+
 async def _maybe_wake_check(conn, cfg: WakeCheckConfig) -> str | None:
     if not cfg.enabled:
         return None
@@ -287,6 +316,11 @@ async def scheduled_greeting_service(server: Any) -> None:
                             f"定点报时跳过(LLM忙): device={device_id}"
                         )
                         continue
+                    if not await _ensure_tts_workers(conn):
+                        logger.bind(tag=TAG).warning(
+                            f"定点报时跳过(TTS线程未就绪): device={device_id}"
+                        )
+                        continue
 
                     h, m = cfg.times.get(slot_to_fire, (now.hour, now.minute))
                     planned_time = f"{int(h):02d}:{int(m):02d}"
@@ -321,6 +355,20 @@ async def scheduled_greeting_service(server: Any) -> None:
                         # Mark as sent before calling chat to prevent same-minute re-entry.
                         sent_today[sent_key] = True
                         await asyncio.to_thread(conn.chat, prompt)
+                        sentence_id = str(getattr(conn, "sentence_id", "") or "")
+                        await asyncio.sleep(0.6)
+                        if (
+                            sentence_id
+                            and not bool(getattr(conn, "client_is_speaking", False))
+                            and str(getattr(conn, "last_tts_sentence_id", "") or "")
+                            != sentence_id
+                        ):
+                            logger.bind(tag=TAG).warning(
+                                f"定点报时已生成文本但未观察到TTS播放: "
+                                f"device={device_id}, sentence_id={sentence_id}, "
+                                f"tts_text_q={getattr(conn.tts, 'tts_text_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_text_queue', None) else -1}, "
+                                f"tts_audio_q={getattr(conn.tts, 'tts_audio_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_audio_queue', None) else -1}"
+                            )
                         logger.bind(tag=TAG).info(
                             f"定点报时触发: slot={slot_to_fire}, device={device_id}, account={account_id}"
                         )

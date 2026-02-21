@@ -59,8 +59,9 @@ _SCHEDULED_TASK_TEMPLATE = Template(SCHEDULED_TASK_BASE_PROMPT_TEMPLATE)
 
 MAIN_HINT_BY_SLOT: dict[str, str] = {
     "morning": (
-        "Do Morning call. Determine the user status as awake/asleep/unknown/nobody ONLY based on "
+        "Do Morning call. Your task is WAKE UP the user! Determine the user status as awake/asleep/unknown/nobody ONLY based on "
         "the wake_up_check_result in CONTEXT_VARS. If result missing or result show unknown means status uncertain. "
+        "Verify that your response is consistent with the evidence to ensure reliable and non-contradictory conclusions. "
         "EXPLICITLY WAKE THE USER UP if the status is asleep. Use evidence only if provided; never fabricate. May use "
         "wake_check tool once again in follow-up chats for a double check."
     ),

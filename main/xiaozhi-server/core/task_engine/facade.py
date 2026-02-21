@@ -8,6 +8,7 @@ from config.logger import setup_logging
 from .registry import get_handler
 from .store import TaskStore
 from .handlers import wake_up as _wake_up_handler  # noqa: F401
+from .handlers import ha_event as _ha_event_handler  # noqa: F401
 
 TAG = __name__
 logger = setup_logging()
@@ -34,6 +35,20 @@ def _now_ms() -> int:
     return int(datetime.now().timestamp() * 1000)
 
 
+def _pick_fallback_device_id(server: Any) -> str:
+    conns = getattr(server, "active_connections_by_device", {}) or {}
+    if not isinstance(conns, dict) or not conns:
+        return ""
+    # Current single-device-first behavior: pick the first online connection.
+    for device_id, conn in conns.items():
+        if not device_id:
+            continue
+        if not conn:
+            continue
+        return str(device_id)
+    return ""
+
+
 async def kickoff_wake_up_from_greeting(server: Any, conn: Any, *, planned_at_ms: int) -> bool:
     enabled, db_path = _engine_enabled(server)
     account_id =  "user"  #_account_key(conn)
@@ -47,7 +62,7 @@ async def kickoff_wake_up_from_greeting(server: Any, conn: Any, *, planned_at_ms
             f"account={account_id or '-'}, device={device_id or '-'}"
         )
         return False
-
+ 
     handler = get_handler("wake_up")
     if not handler:
         logger.bind(tag=TAG).warning(
@@ -96,3 +111,39 @@ async def kickoff_wake_up_from_greeting(server: Any, conn: Any, *, planned_at_ms
             f"device={device_id or '-'}, instance_key={instance_key}, error={e}"
         )
         return False
+
+
+async def kickoff_ha_event_from_state_hub(
+    server: Any,
+    *,
+    event_id: str,
+    title: str,
+    instruction: str,
+    data: Any,
+    now_ms: int,
+) -> int | None:
+    enabled, db_path = _engine_enabled(server)
+    if not enabled:
+        return None
+
+    handler = get_handler("ha_event")
+    if not handler:
+        return None
+
+    store = TaskStore(db_path)
+    store.init_schema()
+
+    trigger = {
+        "source": "state_hub",
+        "event_id": str(event_id or "").strip(),
+        "title": str(title or "").strip(),
+        "instruction": str(instruction or "").strip(),
+        "data": data,
+        "device_id": _pick_fallback_device_id(server),
+        "now_ms": int(now_ms),
+    }
+    if not trigger["event_id"] or not trigger["instruction"]:
+        return None
+
+    account_id = "user"
+    return await handler.kickoff(server, store, account_id=account_id, trigger=trigger)

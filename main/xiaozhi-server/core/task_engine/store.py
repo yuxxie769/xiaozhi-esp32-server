@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS task_instances (
   run_count           INTEGER NOT NULL DEFAULT 0,
   max_runs            INTEGER NOT NULL DEFAULT 20,
   attempt_count       INTEGER NOT NULL DEFAULT 0,
+  context_json        TEXT    NOT NULL DEFAULT '{}',
   created_at_ms       INTEGER NOT NULL,
   updated_at_ms       INTEGER NOT NULL,
   UNIQUE (account_id, task_type, instance_key),
@@ -100,6 +101,7 @@ class TaskStore:
             {
                 "run_count": "run_count INTEGER NOT NULL DEFAULT 0",
                 "max_runs": "max_runs INTEGER NOT NULL DEFAULT 20",
+                "context_json": "context_json TEXT NOT NULL DEFAULT '{}'",
             },
         )
 
@@ -343,6 +345,18 @@ class TaskStore:
                 ).fetchone()
 
         return dict(row) if row else {}
+
+    def set_instance_context(self, *, instance_id: int, context: dict[str, Any] | None, now_ms: int) -> None:
+        ctx = context if isinstance(context, dict) else {}
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE task_instances
+                SET context_json=?, updated_at_ms=?
+                WHERE instance_id=?
+                """.strip(),
+                (_json_dumps(ctx), int(now_ms), int(instance_id)),
+            )
 
     def get_instance_by_id(self, instance_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:

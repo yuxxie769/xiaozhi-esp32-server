@@ -23,7 +23,12 @@ class ClipRules:
         rep = cfg.get("report", {}) if isinstance(cfg.get("report", {}), dict) else {}
 
         self.exclude_domains = set(
-            str(x) for x in (rep.get("exclude_domains") or ["diagnostic", "update", "button"]) if x
+            str(x)
+            for x in (
+                rep.get("exclude_domains")
+                or ["diagnostic", "update", "button", "input_text"]
+            )
+            if x
         )
         self.exclude_entity_id_regex: List[re.Pattern] = []
         for pat in rep.get("exclude_entity_id_regex") or [r"^sensor\..*_linkquality$", r"^sensor\..*_rssi$"]:

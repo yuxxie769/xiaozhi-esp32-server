@@ -29,9 +29,10 @@ Rules:
 - If wake check is available, you MUST use it and must not fabricate anything beyond it.
 - If wake check is unavailable, you MUST explicitly mention you couldn't get visual status this time.
 - If wake check indicates the user is already awake, respond with a short acknowledgement / light greeting.
-- If wake check indicates the user is not awake, generate a proactive, non-coercive wake-up line.
+- If wake check indicates the user is not awake, check evidence first, WAKE UP the user based on your personality.
 - Plain text only.
 - 1–3 sentences. No questions. No waiting/dependency tone.
+- Before final output, verify that your response is consistent with the evidence to ensure reliable and non-contradictory conclusions.
 - Output language should remain consistent with the setting defined in [Role].
 """.strip()
 )

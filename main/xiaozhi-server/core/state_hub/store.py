@@ -18,6 +18,13 @@ class StateHubStore:
         self.allowlist: list[str] = []
         self.target: Dict[str, Any] = {}
 
+        # Route2 (event bus) state: small, latest-only.
+        self.event_bus_entity_id: str = ""
+        self.event_bus_events_seen: int = 0
+        self.event_bus_last_event_id: str = ""
+        self.event_bus_last_event_at_ms: int = 0
+        self.event_bus_last_content: str = ""
+
         self.conn_state: str = "DISCONNECTED"
         self.last_error: str = ""
         self.last_event_at_ms: int = 0
@@ -42,6 +49,10 @@ class StateHubStore:
             target = obj.get("target")
             last_event_at_ms = obj.get("last_event_at_ms")
             rev = obj.get("rev")
+            eb_eid = obj.get("event_bus_entity_id")
+            eb_seen = obj.get("event_bus_events_seen")
+            eb_last_id = obj.get("event_bus_last_event_id")
+            eb_last_at = obj.get("event_bus_last_event_at_ms")
             with self._lock:
                 if isinstance(entities, dict):
                     self.entities = {
@@ -55,6 +66,14 @@ class StateHubStore:
                     self.last_event_at_ms = int(last_event_at_ms)
                 if isinstance(rev, (int, float)):
                     self.rev = int(rev)
+                if isinstance(eb_eid, str):
+                    self.event_bus_entity_id = eb_eid
+                if isinstance(eb_seen, (int, float)):
+                    self.event_bus_events_seen = int(eb_seen)
+                if isinstance(eb_last_id, str):
+                    self.event_bus_last_event_id = eb_last_id
+                if isinstance(eb_last_at, (int, float)):
+                    self.event_bus_last_event_at_ms = int(eb_last_at)
                 # Disk snapshot is always outdated until a new live event arrives.
                 self.conn_state = "DISCONNECTED"
         except FileNotFoundError:
@@ -81,6 +100,36 @@ class StateHubStore:
         with self._lock:
             self.target = target if isinstance(target, dict) else {}
             self.allowlist = list(allowlist or [])
+
+    def set_event_bus_entity_id(self, entity_id: str) -> None:
+        with self._lock:
+            self.event_bus_entity_id = str(entity_id or "").strip()
+
+    def mark_event_bus_event(self, *, entity_id: str, event_id: str, at_ms: int, content: str = "") -> bool:
+        eid = str(entity_id or "").strip()
+        ev_id = str(event_id or "").strip()
+        if not eid or not ev_id:
+            return False
+        with self._lock:
+            self.event_bus_entity_id = eid
+            if self.event_bus_last_event_id == ev_id:
+                return False
+            self.event_bus_events_seen += 1
+            self.event_bus_last_event_id = ev_id
+            self.event_bus_last_event_at_ms = int(at_ms)
+            self.event_bus_last_content = str(content or "").strip()
+            self.rev += 1
+        return True
+
+    def event_bus_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "entity_id": self.event_bus_entity_id,
+                "events_seen": int(self.event_bus_events_seen),
+                "last_event_id": self.event_bus_last_event_id,
+                "last_event_at_ms": int(self.event_bus_last_event_at_ms),
+                "last_content": self.event_bus_last_content,
+            }
 
     def apply_snapshot_added(self, added: Dict[str, Any]) -> bool:
         changed = False
@@ -148,6 +197,10 @@ class StateHubStore:
                 "saved_at_ms": int(time.time() * 1000),
                 "rev": self.rev,
                 "last_event_at_ms": self.last_event_at_ms,
+                "event_bus_entity_id": self.event_bus_entity_id,
+                "event_bus_events_seen": int(self.event_bus_events_seen),
+                "event_bus_last_event_id": self.event_bus_last_event_id,
+                "event_bus_last_event_at_ms": int(self.event_bus_last_event_at_ms),
                 "target": self.target,
                 "allowlist": list(self.allowlist),
                 "entities": dict(self.entities),
