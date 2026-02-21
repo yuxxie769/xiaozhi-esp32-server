@@ -53,8 +53,17 @@ class ServerMCPManager:
             # 初始化服务端MCP客户端
             logger.bind(tag=TAG).info(f"初始化服务端MCP客户端: {name}")
             client = ServerMCPClient(srv_config)
-            # 设置超时时间10秒
-            await asyncio.wait_for(client.initialize(logging_callback=self.logging_callback), timeout=10)
+            init_timeout = srv_config.get("init_timeout", 10)
+            try:
+                init_timeout = float(init_timeout)
+            except (TypeError, ValueError):
+                init_timeout = 10
+
+            # 初始化包含 session.initialize + list_tools，部分服务端首次启动可能较慢
+            await asyncio.wait_for(
+                client.initialize(logging_callback=self.logging_callback),
+                timeout=init_timeout,
+            )
 
             # 使用锁保护共享状态的修改
             async with self._init_lock:

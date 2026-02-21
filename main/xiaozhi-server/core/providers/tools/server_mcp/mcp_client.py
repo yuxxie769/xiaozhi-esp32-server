@@ -6,6 +6,7 @@ from datetime import timedelta
 import asyncio
 import os
 import shutil
+import tempfile
 import concurrent.futures
 from contextlib import AsyncExitStack
 from typing import Optional, List, Dict, Any
@@ -43,6 +44,19 @@ class ServerMCPClient:
         self.tools: List = []  # 原始工具对象
         self.tools_dict: Dict[str, Any] = {}
         self.name_mapping: Dict[str, str] = {}
+        self.stderr_log_path: Optional[str] = None
+
+    def _read_stderr_tail(self, max_lines: int = 80) -> str:
+        """读取子进程stderr日志尾部，便于定位stdio握手失败原因。"""
+        path = self.stderr_log_path
+        if not path or not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            return "".join(lines[-max_lines:]).strip()
+        except Exception:
+            return ""
 
     async def initialize(self, read_timeout_seconds: timedelta | None = None,
              sampling_callback: SamplingFnT | None = None,
@@ -180,13 +194,25 @@ class ServerMCPClient:
                         else self.config["command"]
                     )
                     env = {**os.environ, **self.config.get("env", {})}
+                    cwd = self.config.get("cwd")
                     params = StdioServerParameters(
                         command=cmd,
                         args=self.config.get("args", []),
                         env=env,
+                        cwd=cwd,
                     )
+                    stderr_file = stack.enter_context(
+                        tempfile.NamedTemporaryFile(
+                            mode="w+",
+                            encoding="utf-8",
+                            prefix="mcp_stdio_",
+                            suffix=".stderr.log",
+                            delete=False,
+                        )
+                    )
+                    self.stderr_log_path = stderr_file.name
                     stdio_r, stdio_w = await stack.enter_async_context(
-                        stdio_client(params)
+                        stdio_client(params, errlog=stderr_file)
                     )
                     read_stream, write_stream = stdio_r, stdio_w
 
@@ -256,6 +282,16 @@ class ServerMCPClient:
                 await self._shutdown_evt.wait()
 
             except Exception as e:
-                self.logger.bind(tag=TAG).error(f"服务端MCP客户端工作协程错误: {e}")
+                import traceback
+
+                stderr_tail = self._read_stderr_tail()
+                stderr_msg = (
+                    f"\n子进程stderr日志({self.stderr_log_path})末尾:\n{stderr_tail}"
+                    if stderr_tail
+                    else ""
+                )
+                self.logger.bind(tag=TAG).error(
+                    f"服务端MCP客户端工作协程错误: {e}\n{traceback.format_exc()}{stderr_msg}"
+                )
                 self._ready_evt.set()
-                raise
+                return

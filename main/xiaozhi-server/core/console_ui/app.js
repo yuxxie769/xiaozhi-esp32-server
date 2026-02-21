@@ -918,10 +918,235 @@ curl ${escapeHtml(state.baseUrl)}/tasks/u123/instances?task_type=wake_up\n\
   kickInstanceKeyEl.value = todayKey();
 }
 
+function renderStateHub(state) {
+  const html = `
+    <div class="panel">
+      <div class="panel__titleRow">
+        <h2 class="panel__title">STATE HUB</h2>
+        <button class="iconBtn" id="btnHubHelp" title="Help">!</button>
+      </div>
+      <div class="pillRow" style="margin-top:6px;">
+        <span class="pill"><span class="mono">module</span>: <span class="mono">state_hub</span></span>
+        <span class="pill"><span class="mono">ui</span>: <span class="mono">http-only</span></span>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn--primary" id="btnHubReconnect">Reconnect</button>
+        <button class="btn" id="btnHubRefresh">Refresh Target</button>
+        <span class="pill hubStatus" id="hubConn">connected: -</span>
+        <span class="pill hubStatus" id="hubOutdated">outdated: -</span>
+      </div>
+      <div class="pill mono" id="hubErr" style="margin-top:10px;display:none;"></div>
+    </div>
+
+    <div class="panel">
+      <h2 class="panel__title">ENTITIES</h2>
+      <div style="margin-top:12px;overflow:auto;">
+        <table class="table" id="hubTable">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Entity</th>
+              <th>State</th>
+              <th>Device Class</th>
+              <th>Unit</th>
+              <th>Expose to LLM</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="modal modal--hidden" id="hubHelpModal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal__backdrop" data-act="close"></div>
+      <div class="modal__card">
+        <div class="modal__header">
+          <div class="modal__title">State Hub help (status + actions)</div>
+          <button class="iconBtn" data-act="close" title="Close">×</button>
+        </div>
+        <div class="modal__body mono">
+          <div class="helpGrid">
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">CONNECTED</div>
+              <div class="helpGrid__val">Connected to Home Assistant WebSocket, auth OK, subscription running.</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">DISCONNECTED</div>
+              <div class="helpGrid__val">Not connected (or reconnecting/backoff). UI may show disk snapshot only.</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">FRESH</div>
+              <div class="helpGrid__val">Data comes from the current live subscription (not just offline disk cache).</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">OUTDATED</div>
+              <div class="helpGrid__val">Offline / possibly stale data. Usually means HA is disconnected or live snapshot not received yet.</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">Reconnect</div>
+              <div class="helpGrid__val">Force close HA WS, reconnect + auth, then extract target + resubscribe.</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">Refresh Target</div>
+              <div class="helpGrid__val">Re-run extract_from_target. If allowlist changes, it triggers a reconnect and resubscribe.</div>
+            </div>
+            <div class="helpGrid__row">
+              <div class="helpGrid__key">Expose to LLM</div>
+              <div class="helpGrid__val">Controls whether an entity is included in state_hub_snapshot for the main LLM.</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal__footer">
+          <button class="btn btn--primary" data-act="close">OK</button>
+        </div>
+      </div>
+    </div>
+  `;
+  viewEl.innerHTML = html;
+
+  const connEl = $("#hubConn");
+  const outdatedEl = $("#hubOutdated");
+  const errEl = $("#hubErr");
+  const tbody = $("#hubTable tbody");
+  const helpModalEl = $("#hubHelpModal");
+
+  let timer = null;
+  let lastRev = null;
+  let inflight = false;
+
+  function setErr(text) {
+    const t = String(text || "").trim();
+    if (!t) {
+      errEl.style.display = "none";
+      errEl.textContent = "";
+      return;
+    }
+    errEl.style.display = "block";
+    errEl.textContent = `error: ${t}`;
+  }
+
+  async function post(path, jsonBody) {
+    await apiFetch(state, path, { method: "POST", json: jsonBody || {} });
+  }
+
+  async function tick() {
+    if (inflight) return;
+    inflight = true;
+    try {
+      const data = await apiFetch(state, "/state_hub/entities");
+      const v = (data && data.data) || {};
+      const connected = !!v.connected;
+      const outdated = !!v.outdated;
+      connEl.textContent = connected ? "CONNECTED" : "DISCONNECTED";
+      connEl.classList.toggle("pill--ok", connected);
+      connEl.classList.toggle("pill--bad", !connected);
+
+      outdatedEl.textContent = outdated ? "OUTDATED" : "FRESH";
+      outdatedEl.classList.toggle("pill--bad", outdated);
+      outdatedEl.classList.toggle("pill--ok", !outdated);
+
+      setErr(v.last_error || "");
+
+      if (lastRev !== v.rev) {
+        lastRev = v.rev;
+        const rows = Array.isArray(v.items) ? v.items : [];
+        tbody.innerHTML = rows
+          .map((it) => {
+            const n = escapeHtml(it.n || "");
+            const id = escapeHtml(it.id || "");
+            const s = escapeHtml(it.s ?? "");
+            const dc = escapeHtml(it.dc || "");
+            const u = escapeHtml(it.u || "");
+            const expose = !!it.expose_to_llm;
+            return `
+              <tr data-eid="${escapeHtml(it.id || "")}">
+                <td class="mono">${n}</td>
+                <td class="mono">${id}</td>
+                <td class="mono">${s}</td>
+                <td class="mono">${dc}</td>
+                <td class="mono">${u}</td>
+                <td>
+                  <label class="toggle" title="Expose to LLM">
+                    <span class="toggle__label mono">${expose ? "TRUE" : "FALSE"}</span>
+                    <input class="toggle__input" type="checkbox" data-act="toggle" ${expose ? "checked" : ""} />
+                    <span class="toggle__track"><span class="toggle__thumb"></span></span>
+                  </label>
+                </td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      inflight = false;
+    }
+  }
+
+  $("#btnHubReconnect").addEventListener("click", async () => {
+    try {
+      await post("/state_hub/reconnect");
+      showToast({ kind: "ok", title: "Reconnect", body: "requested" });
+    } catch (e) {
+      showToast({ kind: "bad", title: "Reconnect failed", body: e.message || String(e) });
+    }
+  });
+
+  $("#btnHubRefresh").addEventListener("click", async () => {
+    try {
+      await post("/state_hub/refresh_target");
+      showToast({ kind: "ok", title: "Refresh target", body: "requested" });
+    } catch (e) {
+      showToast({ kind: "bad", title: "Refresh target failed", body: e.message || String(e) });
+    }
+  });
+
+  function showHelp(show) {
+    const on = !!show;
+    helpModalEl.classList.toggle("modal--hidden", !on);
+    helpModalEl.setAttribute("aria-hidden", on ? "false" : "true");
+  }
+
+  $("#btnHubHelp").addEventListener("click", () => showHelp(true));
+
+  helpModalEl.addEventListener("click", (ev) => {
+    const act = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-act");
+    if (act === "close") showHelp(false);
+  });
+
+  tbody.addEventListener("change", async (ev) => {
+    const input = ev.target && ev.target.closest && ev.target.closest("input[data-act]");
+    if (!input) return;
+    const tr = ev.target.closest("tr");
+    const eid = tr && tr.getAttribute("data-eid");
+    if (!eid) return;
+    const nextVal = !!input.checked;
+    try {
+      await post("/state_hub/exposure", { entity_id: eid, expose_to_llm: nextVal });
+      showToast({ kind: "ok", title: "Exposure updated", body: `${eid} -> ${nextVal}` });
+      lastRev = null; // force re-render on next tick
+    } catch (e) {
+      // Revert UI on failure
+      try { input.checked = !nextVal; } catch {}
+      showToast({ kind: "bad", title: "Exposure update failed", body: e.message || String(e) });
+    }
+  });
+
+  timer = setInterval(tick, 1200);
+  tick();
+
+  // Return a disposer by attaching to state (simple pattern)
+  state._disposeView = () => {
+    try { clearInterval(timer); } catch {}
+  };
+}
+
 function init() {
   const state = {
     baseUrl: localStorage.getItem(LS_BASE_URL) || window.location.origin,
     view: "taskEngine",
+    _disposeView: null,
   };
 
   const baseUrlEl = $("#baseUrl");
@@ -932,16 +1157,26 @@ function init() {
     state.baseUrl = v || window.location.origin;
     localStorage.setItem(LS_BASE_URL, state.baseUrl);
     setStatus("base url saved", "ok");
+    if (typeof state._disposeView === "function") {
+      try { state._disposeView(); } catch {}
+      state._disposeView = null;
+    }
     if (state.view === "taskEngine") renderTaskEngine(state);
+    else if (state.view === "stateHub") renderStateHub(state);
   });
 
   $$(".nav__item").forEach((btn) => {
     btn.addEventListener("click", () => {
       const view = btn.getAttribute("data-view");
       if (!view) return;
+      if (typeof state._disposeView === "function") {
+        try { state._disposeView(); } catch {}
+        state._disposeView = null;
+      }
       state.view = view;
       $$(".nav__item").forEach((b) => b.classList.toggle("nav__item--active", b === btn));
       if (view === "taskEngine") renderTaskEngine(state);
+      else if (view === "stateHub") renderStateHub(state);
       else viewEl.innerHTML = `<div class="panel"><h2 class="panel__title">COMING SOON</h2></div>`;
     });
   });

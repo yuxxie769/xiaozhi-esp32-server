@@ -5,6 +5,7 @@ from config.logger import setup_logging
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
 from core.api.task_handler import TaskApiHandler
+from core.api.state_hub_handler import StateHubApiHandler
 from core.console_ui.handler import ConsoleUiHandler
 from core.utils.util import get_local_ip
 
@@ -18,6 +19,7 @@ class SimpleHttpServer:
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
         self.task_handler = TaskApiHandler(config)
+        self.state_hub_handler = StateHubApiHandler(config)
         self.console_ui = ConsoleUiHandler()
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
@@ -113,6 +115,20 @@ class SimpleHttpServer:
                         web.post("/tasks/{account_id}/pause", self.task_handler.handle_pause),
                         web.post("/tasks/{account_id}/cancel", self.task_handler.handle_cancel),
                         web.get("/tasks/{account_id}/attempts", self.task_handler.handle_attempts),
+
+                        # State Hub APIs (no auth in MVP)
+                        web.get("/state_hub/view", self.state_hub_handler.handle_view),
+                        web.get("/state_hub/status", self.state_hub_handler.handle_status),
+                        web.post("/state_hub/reconnect", self.state_hub_handler.handle_reconnect),
+                        web.post("/state_hub/refresh_target", self.state_hub_handler.handle_refresh_target),
+                        web.post("/state_hub/exposure", self.state_hub_handler.handle_exposure),
+                        web.get("/state_hub/entities", self.state_hub_handler.handle_entities),
+                        web.options("/state_hub/view", self.state_hub_handler.handle_options),
+                        web.options("/state_hub/status", self.state_hub_handler.handle_options),
+                        web.options("/state_hub/reconnect", self.state_hub_handler.handle_options),
+                        web.options("/state_hub/refresh_target", self.state_hub_handler.handle_options),
+                        web.options("/state_hub/exposure", self.state_hub_handler.handle_options),
+                        web.options("/state_hub/entities", self.state_hub_handler.handle_options),
                     ]
                 )
 
