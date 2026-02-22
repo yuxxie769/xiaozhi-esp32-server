@@ -20,6 +20,11 @@ import uuid
 from config.logger import setup_logging
 from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
 
+try:
+    from plugins_func.services.proactive_speech_gate import proactive_chat as _proactive_chat
+except Exception:
+    _proactive_chat = None
+
 # 1. 导入依赖、初始化日志、定义配置常量（ENABLED/TARGET_DEVICE_ID等）
 logger = setup_logging()
 TAG = __name__
@@ -146,6 +151,33 @@ async def _push_when_ready(conn) -> None:
                     # 重置连接状态，保证LLM对话正常执行
                     conn.client_abort = False
                     conn.close_after_chat = False
+
+                    if _proactive_chat is not None:
+                        loop = getattr(conn, "loop", None)
+                        server = getattr(conn, "server", None)
+                        if loop and server:
+                            try:
+                                fut = asyncio.run_coroutine_threadsafe(
+                                    _proactive_chat(
+                                        server,
+                                        conn,
+                                        query,
+                                        scenario="push_tts_test/llm_then_tts",
+                                        meta={
+                                            "source": "push_tts_test",
+                                            "device_id": str(device_id or ""),
+                                        },
+                                        gate_tool_call_mode="allow",
+                                    ),
+                                    loop,
+                                )
+                                fut.result()
+                                return
+                            except Exception as gate_err:
+                                logger.bind(tag=TAG).warning(
+                                    f"测试推送proactive_chat失败，回退直接chat: {gate_err}"
+                                )
+
                     conn.chat(query) # 调用ws会话对象的的LLM对话方法
                 except Exception as e:
                     logger.bind(tag=TAG).opt(exception=True).error(

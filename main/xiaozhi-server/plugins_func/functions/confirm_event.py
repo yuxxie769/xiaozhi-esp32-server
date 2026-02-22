@@ -24,12 +24,13 @@ class _EventSpec:
 
 
 _WAKE_UP_COMMAND = """\
-根据当前画面，判断用户是否已经起床（已坐起/离床/明显清醒）。
+根据当前画面，判断用户是否在画面中并且是否已经起床（已坐起/离床/明显清醒）。
 可能会出现没人的情况
 只输出一个JSON对象，禁止输出任何其他文字/markdown/代码块/解释。
 JSON格式必须严格为：
-{"awake":true/false/unknown/nobody,"confidence":0-1,"evidence":"一句话依据"}
+{"awake":true/false,"confidence":0-1,"presence":"true/false","evidence":"一句话依据"}
 confidence为0到1的小数。
+presence为画面是否有人
 evidence用中文且不超过25字。
 """.strip()
 
@@ -38,7 +39,7 @@ EVENT_SPECS: dict[str, _EventSpec] = {
     "wake_up": _EventSpec(
         event="wake_up",
         command=_WAKE_UP_COMMAND,
-        required_keys=("awake", "confidence", "evidence"),
+        required_keys=("awake", "confidence", "presence", "evidence"),
     ),
 }
 
@@ -133,20 +134,37 @@ def _try_parse_json_dict(text: str) -> Optional[dict[str, Any]]:
 def _normalize_wake_up(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not isinstance(payload, dict):
         return None
-    if not {"awake", "confidence", "evidence"}.issubset(payload.keys()):
+    if not {"awake", "confidence", "presence", "evidence"}.issubset(payload.keys()):
         return None
 
+    presence_raw = payload.get("presence", None)
+    presence: bool | None = None
+    if isinstance(presence_raw, bool):
+        presence = presence_raw
+    elif isinstance(presence_raw, str):
+        s = presence_raw.strip().lower()
+        if s in ("true", "1", "yes", "y"):
+            presence = True
+        elif s in ("false", "0", "no", "n"):
+            presence = False
+        elif s in ("unknown", ""):
+            presence = None
+        else:
+            # Keep backward-compat: invalid presence shouldn't fail the whole parse.
+            presence = None
+
     awake_raw = payload.get("awake")
+    awake_bool: bool | None = None
     if isinstance(awake_raw, bool):
-        awake = awake_raw
+        awake_bool = awake_raw
     elif isinstance(awake_raw, str):
         s = awake_raw.strip().lower()
-        if s in ("unknown", "nobody"):
-            awake = s
-        elif s in ("true", "1", "yes", "y"):
-            awake = True
+        if s in ("true", "1", "yes", "y"):
+            awake_bool = True
         elif s in ("false", "0", "no", "n"):
-            awake = False
+            awake_bool = False
+        elif s in ("unknown", "nobody", ""):
+            awake_bool = False
         else:
             return None
     else:
@@ -166,7 +184,12 @@ def _normalize_wake_up(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
     if len(evidence) > 80:
         evidence = evidence[:80]
 
-    return {"awake": awake, "confidence": confidence, "evidence": evidence}
+    # Rule: awake can be true only if presence is true and awake is true.
+    awake = bool(presence is True and awake_bool is True)
+
+    if presence is not True and presence is not False:
+        return None
+    return {"awake": awake, "confidence": confidence, "presence": presence, "evidence": evidence}
 
 
 def _format_wake_up_check_result(
@@ -180,13 +203,12 @@ def _format_wake_up_check_result(
     confidence = 0.0
     evidence = ""
     if ok and isinstance(payload, dict):
+        presence_val = payload.get("presence", None)
         awake_val = payload.get("awake")
         if isinstance(awake_val, bool):
             awake = "true" if awake_val else "false"
-        elif isinstance(awake_val, str):
-            awake = awake_val.strip().lower() or "unknown"
         elif awake_val is not None:
-            awake = str(awake_val).strip().lower() or "unknown"
+            awake = str(awake_val).strip().lower() or "false"
         try:
             confidence = float(payload.get("confidence", 0.0) or 0.0)
         except Exception:
@@ -194,6 +216,7 @@ def _format_wake_up_check_result(
         evidence = str(payload.get("evidence", "") or "").strip()
     else:
         evidence = (str(error or "") or "unavailable").strip()
+        presence_val = None
 
     if confidence < 0.0:
         confidence = 0.0
@@ -206,10 +229,10 @@ def _format_wake_up_check_result(
 
     if not ok:
         flag = "unavailable"
+    elif presence_val is False:
+        flag = "nobody"
     elif awake == "false":
         flag = "unwake"
-    elif awake in ("unknown", "nobody"):
-        flag = awake
     elif confidence < float(min_confidence):
         flag = "low_confidence"
     else:
@@ -354,17 +377,17 @@ def _classify_wake_up_from_text(text: str) -> dict[str, Any]:
 
     for m in nobody_markers:
         if m in lower or m in t:
-            return {"awake": "nobody", "confidence": 0.7, "evidence": snippet}
+            return {"awake": False, "presence": False, "confidence": 0.7, "evidence": snippet}
     for m in asleep_markers:
         if m in lower or m in t:
-            return {"awake": False, "confidence": 0.6, "evidence": snippet}
+            return {"awake": False, "presence": True, "confidence": 0.6, "evidence": snippet}
     for m in awake_markers:
         if m in lower or m in t:
-            return {"awake": True, "confidence": 0.6, "evidence": snippet}
+            return {"awake": True, "presence": True, "confidence": 0.6, "evidence": snippet}
 
     if not t:
-        return {"awake": "unknown", "confidence": 0.0, "evidence": ""}
-    return {"awake": "unknown", "confidence": 0.2, "evidence": snippet}
+        return {"awake": False, "presence": False, "confidence": 0.0, "evidence": ""}
+    return {"awake": False, "presence": False, "confidence": 0.2, "evidence": snippet}
 
 
 async def _vision_tool_available(conn, tool_name: str) -> bool:
@@ -431,14 +454,22 @@ async def run_confirm_event(
                             parsed = nested
 
                 # Some tools may return {"error":"..."} without "success".
+                required_keys = tuple(getattr(spec, "required_keys", ()) or ())
+                err_text = ""
+                if isinstance(parsed, dict):
+                    err_text = str(parsed.get("error") or "").strip()
                 if (
                     spec.event == "wake_up"
                     and isinstance(parsed, dict)
-                    and parsed.get("error")
-                    and not any(k in parsed for k in ("awake", "confidence", "evidence", "result", "success"))
+                    and err_text
                 ):
-                    last_err = str(parsed.get("error") or "vision_tool_error")
-                    continue
+                    if parsed.get("success") is False:
+                        last_err = err_text
+                        continue
+                    has_required_payload = all(k in parsed for k in required_keys)
+                    if not has_required_payload:
+                        last_err = err_text
+                        continue
 
                 if spec.event == "wake_up" and parsed:
                     normalized = _normalize_wake_up(parsed)

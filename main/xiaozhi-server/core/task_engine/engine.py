@@ -18,6 +18,13 @@ from .handlers import ha_event as _ha_event_handler  # noqa: F401
 TAG = __name__
 logger = setup_logging()
 
+try:
+    from plugins_func.services.proactive_speech_gate import proactive_chat as _proactive_chat
+except Exception:
+    _proactive_chat = None
+
+_ATTEMPTS_CONTEXT_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class TaskEngineConfig:
@@ -83,6 +90,46 @@ def _can_chat(conn) -> bool:
     if not getattr(conn, "llm_finish_task", True):
         return False
     return True
+
+
+def _try_json_load_or_keep(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    s = raw.strip()
+    if not s:
+        return {}
+    try:
+        return json.loads(s)
+    except Exception:
+        return raw
+
+
+def _build_attempts_context(store: TaskStore, *, instance_id: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    rows = store.list_attempts(instance_id=instance_id, limit=max(1, int(limit)) + 1)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+
+    attempts: list[dict[str, Any]] = []
+    for row in rows:
+        attempts.append(
+            {
+                "attempt_id": int(row.get("attempt_id") or 0),
+                "at_ms": int(row.get("at_ms") or 0),
+                "result_code": str(row.get("result_code") or ""),
+                "decision_code": str(row.get("decision_code") or ""),
+                "result_json": _try_json_load_or_keep(row.get("result_json")),
+                "decision_json": _try_json_load_or_keep(row.get("decision_json")),
+            }
+        )
+    return attempts, truncated
+
+
+def _inject_attempts_context_into_prompt(prompt: str, attempts: list[dict[str, Any]]) -> str:
+    try:
+        attempts_json = json.dumps(attempts, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        attempts_json = "[]"
+    return f"[Task Engine Attempts]\n{attempts_json}\n[/Task Engine Attempts]\n\n{prompt}"
 
 
 async def run_due_once(server: Any) -> None:
@@ -232,8 +279,48 @@ async def run_instance_row(server: Any, store: TaskStore, row: dict[str, Any], *
     conn = (getattr(server, "active_connections_by_device", {}) or {}).get(device_id)
     if not _can_chat(conn):
         return
+
+    nudge_meta: dict[str, Any] = {
+        "task_type": task_type,
+        "instance_id": instance_id,
+        "result_code": result_code,
+        "decision_code": decision_code,
+    }
+    nudge_prompt_to_send = nudge_prompt
     try:
-        await asyncio.to_thread(conn.chat, nudge_prompt)
+        attempts, truncated = _build_attempts_context(
+            store, instance_id=instance_id, limit=_ATTEMPTS_CONTEXT_LIMIT
+        )
+        nudge_meta["attempts"] = attempts
+        nudge_prompt_to_send = _inject_attempts_context_into_prompt(nudge_prompt, attempts)
+        logger.bind(tag=TAG).info(
+            f"task_engine attempts context: instance_id={instance_id}, "
+            f"attempts_count={len(attempts)}, truncated={truncated}"
+        )
+    except Exception as e:
+        logger.bind(tag=TAG).warning(
+            f"task_engine attempts context build failed: instance_id={instance_id}, error={e}"
+        )
+
+    try:
+        scenario = f"task_engine/{task_type or 'unknown'}"
+        if _proactive_chat is None:
+            await asyncio.to_thread(conn.chat, nudge_prompt_to_send)
+        else:
+            try:
+                await _proactive_chat(
+                    server,
+                    conn,
+                    nudge_prompt_to_send,
+                    scenario=scenario,
+                    meta=nudge_meta,
+                    gate_tool_call_mode=("off" if task_type == "wake_up" else "allow"),
+                )
+            except Exception as gate_err:
+                logger.bind(tag=TAG).warning(
+                    f"proactive_chat unavailable during task_engine nudge, fallback chat: {gate_err}"
+                )
+                await asyncio.to_thread(conn.chat, nudge_prompt_to_send)
     except Exception as e:
         logger.bind(tag=TAG).warning(f"nudge chat failed: {e}")
 
@@ -258,6 +345,9 @@ async def run_instance_id(server: Any, *, instance_id: int) -> None:
 
 
 async def task_engine_service_loop(server: Any) -> None:
+    logger.bind(tag=TAG).info(
+        f"proactive_speech_gate bridge: {'ready' if _proactive_chat is not None else 'unavailable'}"
+    )
     store: TaskStore | None = None
     last_cfg_repr: str | None = None
     while True:

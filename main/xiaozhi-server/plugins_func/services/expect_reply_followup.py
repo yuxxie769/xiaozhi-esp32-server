@@ -11,6 +11,11 @@ from jinja2 import Template
 
 from .registry import register_service
 
+try:
+    from plugins_func.services.proactive_speech_gate import proactive_chat as _proactive_chat
+except Exception:
+    _proactive_chat = None
+
 TAG = __name__
 logger = setup_logging()
 
@@ -112,6 +117,9 @@ class _Pending:
 
 @register_service("expect_reply_followup")
 async def expect_reply_followup_service(server: Any) -> None:
+    logger.bind(tag=TAG).info(
+        f"proactive_speech_gate bridge: {'ready' if _proactive_chat is not None else 'unavailable'}"
+    )
     pending: dict[int, _Pending] = {}
     sent_count: dict[int, int] = {}
     last_cfg_repr: str | None = None
@@ -249,11 +257,34 @@ async def expect_reply_followup_service(server: Any) -> None:
                     f"expect_reply followup trigger: device={device_id}, close_after={cfg.close_after_followup}"
                 )
 
-                if cfg.close_after_followup:
-                    conn.close_after_chat = True
-
                 # 使用 to_thread 避免阻塞服务循环
-                await asyncio.to_thread(conn.chat, followup_prompt)
+                spoke = False
+                if _proactive_chat is None:
+                    await asyncio.to_thread(conn.chat, followup_prompt)
+                    spoke = True
+                else:
+                    try:
+                        spoke = await _proactive_chat(
+                            server,
+                            conn,
+                            followup_prompt,
+                            scenario="expect_reply_followup",
+                            meta={
+                                "device_id": device_id,
+                                "silence_seconds": cfg.silence_seconds,
+                                "max_sentences": cfg.max_sentences,
+                            },
+                            gate_tool_call_mode="allow",
+                        )
+                    except Exception as gate_err:
+                        logger.bind(tag=TAG).warning(
+                            f"proactive_chat unavailable in expect_reply_followup, fallback chat: {gate_err}"
+                        )
+                        await asyncio.to_thread(conn.chat, followup_prompt)
+                        spoke = True
+
+                if spoke and cfg.close_after_followup:
+                    conn.close_after_chat = True
 
             # 清理已失活连接
             for conn_id in list(pending.keys()):

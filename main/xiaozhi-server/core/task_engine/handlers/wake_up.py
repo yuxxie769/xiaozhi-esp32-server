@@ -6,12 +6,17 @@ from datetime import datetime
 from typing import Any
 
 from jinja2 import Template
+from config.logger import setup_logging
 
 from plugins_func.functions.confirm_event import DEFAULT_VISION_TOOL_NAME, run_confirm_event
 from core.task_engine.prompts.greeting_style import build_greeting_style_prompt
 
 from ..registry import register_handler
 from ..store import TaskStore
+
+
+TAG = __name__
+logger = setup_logging()
 
 
 _NUDGE_TEMPLATE = Template(
@@ -30,6 +35,7 @@ Rules:
 - If wake check is unavailable, you MUST explicitly mention you couldn't get visual status this time.
 - If wake check indicates the user is already awake, respond with a short acknowledgement / light greeting.
 - If wake check indicates the user is not awake, check evidence first, WAKE UP the user based on your personality.
+- If wake check indicates the user is not presence, reply on the premise that it is UNCERTAIN whether anyone is present.
 - Plain text only.
 - 1–3 sentences. No questions. No waiting/dependency tone.
 - Before final output, verify that your response is consistent with the evidence to ensure reliable and non-contradictory conclusions.
@@ -381,6 +387,7 @@ class WakeUpTaskHandler:
         else:
             data = confirm.get("data") if isinstance(confirm.get("data"), dict) else {}
             awake_val = data.get("awake")
+            presence_val = data.get("presence")
             confidence = _safe_float(data.get("confidence", 0.0), 0.0)
             evidence = str(data.get("evidence", "") or "").strip()
             awake_str = (
@@ -395,19 +402,21 @@ class WakeUpTaskHandler:
                 "confidence": confidence,
                 "evidence": evidence,
             }
+            if isinstance(presence_val, bool):
+                result_json["presence"] = presence_val
 
-            if awake_str == "false":
-                result_code = "unwake"
-            elif awake_str == "nobody":
+            if presence_val is False:
                 result_code = "nobody"
-            elif awake_str == "unknown":
-                result_code = "unknown"
+            elif awake_str == "false":
+                result_code = "unwake"
             else:
                 result_code = "ok"
 
         if result_code == "ok":
             decision_json: dict[str, Any] = {"consume_attempt": True}
-            should_chat = bool(nudge_enabled) and (attempt_no == 1 or result_code in ("ok", "unwake"))
+            should_chat = bool(nudge_enabled) and (
+                attempt_no == 1 or result_code in ("ok", "unwake", "nobody", "unknown")
+            )
             if should_chat:
                 planned_at_ms = _safe_int(instance.get("planned_at_ms", now_ms), now_ms)
                 planned_hhmm = _format_ms_hhmm(planned_at_ms)
@@ -427,6 +436,11 @@ class WakeUpTaskHandler:
                         attempt_no=attempt_no,
                         wake_check_text=wake_check_text,
                     )
+            else:
+                logger.bind(tag=TAG).info(
+                    f"wake_up skip nudge: attempt_no={attempt_no}, result_code={result_code}, "
+                    f"nudge_enabled={nudge_enabled}"
+                )
             return (result_code, result_json, "complete", decision_json)
 
         next_action_at_ms = now_ms + int(cooldown_sec) * 1000
@@ -441,8 +455,10 @@ class WakeUpTaskHandler:
 
         # Speak policy:
         # - attempt #1: always speak (even if wake_check is unavailable/uncertain)
-        # - attempt #2+: speak only when vision confirms awake/unwake (ok/unwake)
-        should_chat = bool(nudge_enabled) and (attempt_no == 1 or result_code in ("ok", "unwake"))
+        # - attempt #2+: allow speaking for awake/unwake and absence/unknown states
+        should_chat = bool(nudge_enabled) and (
+            attempt_no == 1 or result_code in ("ok", "unwake", "nobody", "unknown")
+        )
         if should_chat:
             planned_at_ms = _safe_int(instance.get("planned_at_ms", now_ms), now_ms)
             planned_hhmm = _format_ms_hhmm(planned_at_ms)
@@ -462,6 +478,11 @@ class WakeUpTaskHandler:
                     attempt_no=attempt_no,
                     wake_check_text=wake_check_text,
                 )
+        else:
+            logger.bind(tag=TAG).info(
+                f"wake_up skip nudge: attempt_no={attempt_no}, result_code={result_code}, "
+                f"nudge_enabled={nudge_enabled}"
+            )
 
         return (
             result_code,

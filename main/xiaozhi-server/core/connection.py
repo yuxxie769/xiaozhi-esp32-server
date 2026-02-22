@@ -937,6 +937,24 @@ class ConnectionHandler:
         ):
             functions = self.func_handler.get_functions()
         response_message = []
+        top_level_finalized = False
+
+        def _finalize_top_level_chat() -> None:
+            nonlocal top_level_finalized
+            if depth != 0 or top_level_finalized:
+                return
+            try:
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
+                    )
+                )
+            except Exception:
+                pass
+            self.llm_finish_task = True
+            top_level_finalized = True
 
         debug_cfg = self.config.get("debug", {}) if isinstance(self.config, dict) else {}
         llm_debug_cfg = (
@@ -1077,6 +1095,7 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
+            _finalize_top_level_chat()
             return None
 
         # 处理流式响应
@@ -1158,73 +1177,78 @@ class ConnectionHandler:
                         f"检测到疑问符但未见<Q>，启用期待回复兜底: device={self.device_id}, session={self.session_id}"
                     )
 
-        for response in llm_responses:
-            if self.client_abort:
-                break
-            if self.intent_type == "function_call" and functions is not None:
-                content, tools_call = response
-                if "content" in response:
-                    content = response["content"]
-                    tools_call = None
-                if content is not None and len(content) > 0:
+        try:
+            for response in llm_responses:
+                if self.client_abort:
+                    break
+                if self.intent_type == "function_call" and functions is not None:
+                    content, tools_call = response
+                    if "content" in response:
+                        content = response["content"]
+                        tools_call = None
+                    if content is not None and len(content) > 0:
+                        if (
+                            enable_llm_logging_this_call
+                            and log_llm_response
+                            and raw_stream_len < log_llm_max_chars
+                        ):
+                            take = content
+                            if raw_stream_len + len(take) > log_llm_max_chars:
+                                take = take[: max(0, log_llm_max_chars - raw_stream_len)]
+                            if take:
+                                raw_stream_parts.append(take)
+                                raw_stream_len += len(take)
+                        content_arguments += content
+
+                    if not tool_call_flag and content_arguments.startswith("<tool_call>"):
+                        # print("content_arguments", content_arguments)
+                        tool_call_flag = True
+
+                    if tools_call is not None and len(tools_call) > 0:
+                        tool_call_flag = True
+                        self._merge_tool_calls(tool_calls_list, tools_call)
+                else:
+                    content = response
                     if (
                         enable_llm_logging_this_call
                         and log_llm_response
+                        and content is not None
+                        and len(str(content)) > 0
                         and raw_stream_len < log_llm_max_chars
                     ):
-                        take = content
+                        take = str(content)
                         if raw_stream_len + len(take) > log_llm_max_chars:
                             take = take[: max(0, log_llm_max_chars - raw_stream_len)]
                         if take:
                             raw_stream_parts.append(take)
                             raw_stream_len += len(take)
-                    content_arguments += content
 
-                if not tool_call_flag and content_arguments.startswith("<tool_call>"):
-                    # print("content_arguments", content_arguments)
-                    tool_call_flag = True
+                # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
+                if emotion_flag and content is not None and content.strip():
+                    asyncio.run_coroutine_threadsafe(
+                        textUtils.get_emotion(self, content),
+                        self.loop,
+                    )
+                    emotion_flag = False
 
-                if tools_call is not None and len(tools_call) > 0:
-                    tool_call_flag = True
-                    self._merge_tool_calls(tool_calls_list, tools_call)
-            else:
-                content = response
-                if (
-                    enable_llm_logging_this_call
-                    and log_llm_response
-                    and content is not None
-                    and len(str(content)) > 0
-                    and raw_stream_len < log_llm_max_chars
-                ):
-                    take = str(content)
-                    if raw_stream_len + len(take) > log_llm_max_chars:
-                        take = take[: max(0, log_llm_max_chars - raw_stream_len)]
-                    if take:
-                        raw_stream_parts.append(take)
-                        raw_stream_len += len(take)
-
-            # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
-            if emotion_flag and content is not None and content.strip():
-                asyncio.run_coroutine_threadsafe(
-                    textUtils.get_emotion(self, content),
-                    self.loop,
-                )
-                emotion_flag = False
-
-            if content is not None and len(content) > 0:
-                if not tool_call_flag:
-                    cleaned = _strip_control_tags(content)
-                    if cleaned:
-                        _maybe_mark_expect_reply_from_text(cleaned)
-                        response_message.append(cleaned)
-                        self.tts.tts_text_queue.put(
-                            TTSMessageDTO(
-                                sentence_id=self.sentence_id,
-                                sentence_type=SentenceType.MIDDLE,
-                                content_type=ContentType.TEXT,
-                                content_detail=cleaned,
+                if content is not None and len(content) > 0:
+                    if not tool_call_flag:
+                        cleaned = _strip_control_tags(content)
+                        if cleaned:
+                            _maybe_mark_expect_reply_from_text(cleaned)
+                            response_message.append(cleaned)
+                            self.tts.tts_text_queue.put(
+                                TTSMessageDTO(
+                                    sentence_id=self.sentence_id,
+                                    sentence_type=SentenceType.MIDDLE,
+                                    content_type=ContentType.TEXT,
+                                    content_detail=cleaned,
+                                )
                             )
-                        )
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"LLM 流式处理出错 {query}: {e}")
+            _finalize_top_level_chat()
+            return None
         # 处理function call
         if enable_llm_logging_this_call and log_llm_response:
             try:
@@ -1437,14 +1461,7 @@ class ConnectionHandler:
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
         if depth == 0:
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                )
-            )
-            self.llm_finish_task = True
+            _finalize_top_level_chat()
             # Keep any <Q> detected in nested chat() calls (e.g. tool follow-up generation).
             self.expect_user_reply = bool(self.expect_user_reply or expect_user_reply)
             if self.expect_user_reply:

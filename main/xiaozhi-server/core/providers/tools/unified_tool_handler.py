@@ -123,7 +123,11 @@ class UnifiedToolHandler:
     def current_support_functions(self) -> List[str]:
         """获取当前支持的函数名称列表"""
         func_names = self.tool_manager.get_supported_tool_names()
-        self.logger.info(f"当前支持的函数列表: {func_names}")
+        preview = func_names[:60]
+        suffix = "" if len(func_names) <= 60 else f"...(+{len(func_names) - 60})"
+        self.logger.info(
+            f"当前支持的函数列表: count={len(func_names)}, preview={preview}{suffix}"
+        )
         return func_names
 
     def upload_functions_desc(self):

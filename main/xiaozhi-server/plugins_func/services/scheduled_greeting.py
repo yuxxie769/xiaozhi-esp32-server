@@ -11,6 +11,11 @@ from plugins_func.functions.confirm_event import wake_check
 from core.task_engine.facade import kickoff_wake_up_from_greeting
 from core.task_engine.prompts.greeting_style import build_greeting_style_prompt
 
+try:
+    from plugins_func.services.proactive_speech_gate import proactive_chat as _proactive_chat
+except Exception:
+    _proactive_chat = None
+
 TAG = __name__
 logger = setup_logging()
 
@@ -198,6 +203,9 @@ async def _maybe_wake_check(conn, cfg: WakeCheckConfig) -> str | None:
 
 @register_service("scheduled_greeting")
 async def scheduled_greeting_service(server: Any) -> None:
+    logger.bind(tag=TAG).info(
+        f"proactive_speech_gate bridge: {'ready' if _proactive_chat is not None else 'unavailable'}"
+    )
     sent_today: dict[tuple[str, str, str], bool] = {}
     last_cfg_repr: str | None = None
     last_cfg_warn_repr: str | None = None
@@ -354,24 +362,53 @@ async def scheduled_greeting_service(server: Any) -> None:
                     try:
                         # Mark as sent before calling chat to prevent same-minute re-entry.
                         sent_today[sent_key] = True
-                        await asyncio.to_thread(conn.chat, prompt)
-                        sentence_id = str(getattr(conn, "sentence_id", "") or "")
-                        await asyncio.sleep(0.6)
-                        if (
-                            sentence_id
-                            and not bool(getattr(conn, "client_is_speaking", False))
-                            and str(getattr(conn, "last_tts_sentence_id", "") or "")
-                            != sentence_id
-                        ):
-                            logger.bind(tag=TAG).warning(
-                                f"定点报时已生成文本但未观察到TTS播放: "
-                                f"device={device_id}, sentence_id={sentence_id}, "
-                                f"tts_text_q={getattr(conn.tts, 'tts_text_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_text_queue', None) else -1}, "
-                                f"tts_audio_q={getattr(conn.tts, 'tts_audio_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_audio_queue', None) else -1}"
+                        spoke = False
+                        if _proactive_chat is None:
+                            await asyncio.to_thread(conn.chat, prompt)
+                            spoke = True
+                        else:
+                            try:
+                                spoke = await _proactive_chat(
+                                    server,
+                                    conn,
+                                    prompt,
+                                    scenario=f"scheduled_greeting/{slot_to_fire}",
+                                    meta={
+                                        "slot": slot_to_fire,
+                                        "planned_time": planned_time,
+                                        "device_id": device_id,
+                                        "account_id": account_id,
+                                    },
+                                    gate_tool_call_mode="allow",
+                                )
+                            except Exception as gate_err:
+                                logger.bind(tag=TAG).warning(
+                                    f"proactive_chat unavailable in scheduled_greeting, fallback chat: {gate_err}"
+                                )
+                                await asyncio.to_thread(conn.chat, prompt)
+                                spoke = True
+                        if spoke:
+                            sentence_id = str(getattr(conn, "sentence_id", "") or "")
+                            await asyncio.sleep(0.6)
+                            if (
+                                sentence_id
+                                and not bool(getattr(conn, "client_is_speaking", False))
+                                and str(getattr(conn, "last_tts_sentence_id", "") or "")
+                                != sentence_id
+                            ):
+                                logger.bind(tag=TAG).warning(
+                                    f"定点报时已生成文本但未观察到TTS播放: "
+                                    f"device={device_id}, sentence_id={sentence_id}, "
+                                    f"tts_text_q={getattr(conn.tts, 'tts_text_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_text_queue', None) else -1}, "
+                                    f"tts_audio_q={getattr(conn.tts, 'tts_audio_queue', None).qsize() if getattr(conn, 'tts', None) and getattr(conn.tts, 'tts_audio_queue', None) else -1}"
+                                )
+                            logger.bind(tag=TAG).info(
+                                f"定点报时触发: slot={slot_to_fire}, device={device_id}, account={account_id}"
                             )
-                        logger.bind(tag=TAG).info(
-                            f"定点报时触发: slot={slot_to_fire}, device={device_id}, account={account_id}"
-                        )
+                        else:
+                            logger.bind(tag=TAG).info(
+                                f"定点报时触发已静默跳过: slot={slot_to_fire}, device={device_id}, account={account_id}"
+                            )
                     except Exception as e:
                         sent_today.pop(sent_key, None)
                         logger.bind(tag=TAG).opt(exception=True).error(
