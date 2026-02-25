@@ -132,6 +132,30 @@ def _inject_attempts_context_into_prompt(prompt: str, attempts: list[dict[str, A
     return f"[Task Engine Attempts]\n{attempts_json}\n[/Task Engine Attempts]\n\n{prompt}"
 
 
+def _inject_binding_into_prompt(prompt: str, binding: dict[str, Any]) -> str:
+    try:
+        binding_json = json.dumps(binding, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        binding_json = "{}"
+    return f"[Task Engine Binding]\n{binding_json}\n[/Task Engine Binding]\n\n{prompt}"
+
+
+def _load_control_ctx_ttl_seconds(server: Any) -> int:
+    plugins = (getattr(server, "config", None) or {}).get("plugins", {})
+    cfg = plugins.get("task_engine_control", {}) if isinstance(plugins, dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        ttl = int(cfg.get("ctx_ttl_seconds", 1800))
+    except Exception:
+        ttl = 1800
+    if ttl < 10:
+        ttl = 10
+    if ttl > 24 * 3600:
+        ttl = 24 * 3600
+    return ttl
+
+
 async def run_due_once(server: Any) -> None:
     cfg = _load_engine_config(server)
     if not cfg.enabled:
@@ -215,7 +239,7 @@ async def run_instance_row(server: Any, store: TaskStore, row: dict[str, Any], *
     if consume_attempt:
         store.increment_attempt_count(instance_id=instance_id, now_ms=now_ms)
 
-    store.append_attempt(
+    attempt_id = store.append_attempt(
         instance_id=instance_id,
         at_ms=now_ms,
         result_code=result_code,
@@ -283,6 +307,7 @@ async def run_instance_row(server: Any, store: TaskStore, row: dict[str, Any], *
     nudge_meta: dict[str, Any] = {
         "task_type": task_type,
         "instance_id": instance_id,
+        "attempt_id": int(attempt_id or 0),
         "result_code": result_code,
         "decision_code": decision_code,
     }
@@ -301,6 +326,31 @@ async def run_instance_row(server: Any, store: TaskStore, row: dict[str, Any], *
         logger.bind(tag=TAG).warning(
             f"task_engine attempts context build failed: instance_id={instance_id}, error={e}"
         )
+
+    # Bind this connection to the current attempt for control-plane overrides.
+    # For now, only wake_up supports overrides.
+    if task_type == "wake_up":
+        try:
+            ttl_seconds = _load_control_ctx_ttl_seconds(server)
+            window_end_at_ms = int(instance.get("window_end_at_ms") or 0)
+            expires_at_ms = now_ms + int(ttl_seconds) * 1000
+            if window_end_at_ms > 0:
+                expires_at_ms = min(expires_at_ms, window_end_at_ms)
+
+            binding = {
+                "task_type": task_type,
+                "instance_id": int(instance_id),
+                "attempt_id": int(attempt_id or 0),
+                "result_code": str(result_code or ""),
+                "bound_at_ms": int(now_ms),
+                "expires_at_ms": int(expires_at_ms),
+            }
+            setattr(conn, "_task_engine_binding", binding)
+            nudge_prompt_to_send = _inject_binding_into_prompt(nudge_prompt_to_send, binding)
+        except Exception as e:
+            logger.bind(tag=TAG).warning(
+                f"task_engine binding injection failed: instance_id={instance_id}, error={e}"
+            )
 
     try:
         scenario = f"task_engine/{task_type or 'unknown'}"

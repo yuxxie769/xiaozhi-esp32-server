@@ -565,6 +565,250 @@ class TaskStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_latest_attempt_id(self, *, instance_id: int) -> int | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT attempt_id FROM task_attempts
+                WHERE instance_id=?
+                ORDER BY at_ms DESC
+                LIMIT 1
+                """.strip(),
+                (int(instance_id),),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row["attempt_id"])
+        except Exception:
+            return None
+
+    def get_attempt_by_id(self, *, attempt_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_attempts WHERE attempt_id=?",
+                (int(attempt_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_attempt_by_id(
+        self,
+        *,
+        attempt_id: int,
+        result_code: str,
+        result_json: dict[str, Any] | None,
+        decision_code: str,
+        decision_json: dict[str, Any] | None,
+    ) -> None:
+        result_code = str(result_code or "").strip() or "unknown"
+        decision_code = str(decision_code or "").strip() or "skip"
+        res_obj = result_json if isinstance(result_json, dict) else {}
+        dec_obj = decision_json if isinstance(decision_json, dict) else {}
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE task_attempts
+                SET result_code=?, result_json=?, decision_code=?, decision_json=?
+                WHERE attempt_id=?
+                """.strip(),
+                (
+                    result_code,
+                    _json_dumps(res_obj),
+                    decision_code,
+                    _json_dumps(dec_obj),
+                    int(attempt_id),
+                ),
+            )
+
+    def update_attempt_and_set_instance_status(
+        self,
+        *,
+        attempt_id: int,
+        result_code: str,
+        result_json: dict[str, Any] | None,
+        decision_code: str,
+        decision_json: dict[str, Any] | None,
+        instance_id: int,
+        status: str,
+        now_ms: int,
+        next_action_at_ms: int | None = None,
+    ) -> None:
+        """
+        Atomically update an attempt row and transition the instance status in one transaction.
+        """
+        result_code = str(result_code or "").strip() or "unknown"
+        decision_code = str(decision_code or "").strip() or "skip"
+        status = str(status or "").strip()
+        if not status:
+            raise ValueError("status required")
+        res_obj = result_json if isinstance(result_json, dict) else {}
+        dec_obj = decision_json if isinstance(decision_json, dict) else {}
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE task_attempts
+                SET result_code=?, result_json=?, decision_code=?, decision_json=?
+                WHERE attempt_id=?
+                """.strip(),
+                (
+                    result_code,
+                    _json_dumps(res_obj),
+                    decision_code,
+                    _json_dumps(dec_obj),
+                    int(attempt_id),
+                ),
+            )
+            if int(cur.rowcount or 0) != 1:
+                raise RuntimeError("attempt_update_failed")
+
+            if next_action_at_ms is None:
+                conn.execute(
+                    """
+                    UPDATE task_instances
+                    SET status=?, updated_at_ms=?
+                    WHERE instance_id=?
+                    """.strip(),
+                    (status, int(now_ms), int(instance_id)),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE task_instances
+                    SET status=?, next_action_at_ms=?, updated_at_ms=?
+                    WHERE instance_id=?
+                    """.strip(),
+                    (status, int(next_action_at_ms), int(now_ms), int(instance_id)),
+                )
+
+    def override_wake_up_attempt_to_ok_guarded(
+        self,
+        *,
+        instance_id: int,
+        attempt_id: int,
+        result_json: dict[str, Any] | None,
+        decision_json: dict[str, Any] | None,
+        now_ms: int,
+    ) -> str:
+        """
+        Guarded override for wake_up:
+        - attempt must belong to instance
+        - attempt must still be the latest attempt for instance
+        - instance must still be active (PENDING/IN_PROGRESS)
+        - instance.task_type must be wake_up
+        - task row must exist and be enabled
+        Returns:
+          "updated" | "already_ok" | "attempt_not_found" | "attempt_not_latest" |
+          "instance_not_active" | "task_disabled_or_missing" | "wrong_task_type" |
+          "precondition_failed"
+        """
+        res_obj = result_json if isinstance(result_json, dict) else {}
+        dec_obj = decision_json if isinstance(decision_json, dict) else {}
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE task_attempts
+                SET result_code='ok',
+                    result_json=?,
+                    decision_code='complete',
+                    decision_json=?
+                WHERE attempt_id=?
+                  AND instance_id=?
+                  AND result_code <> 'ok'
+                  AND attempt_id=(
+                    SELECT a2.attempt_id
+                    FROM task_attempts a2
+                    WHERE a2.instance_id=?
+                    ORDER BY a2.at_ms DESC
+                    LIMIT 1
+                  )
+                  AND EXISTS(
+                    SELECT 1
+                    FROM task_instances i
+                    JOIN tasks t
+                      ON t.account_id=i.account_id AND t.task_type=i.task_type
+                    WHERE i.instance_id=?
+                      AND i.task_type='wake_up'
+                      AND i.status IN ('PENDING','IN_PROGRESS')
+                      AND t.enabled=1
+                  )
+                """.strip(),
+                (
+                    _json_dumps(res_obj),
+                    _json_dumps(dec_obj),
+                    int(attempt_id),
+                    int(instance_id),
+                    int(instance_id),
+                    int(instance_id),
+                ),
+            )
+            if int(cur.rowcount or 0) == 1:
+                i_cur = conn.execute(
+                    """
+                    UPDATE task_instances
+                    SET status='COMPLETED',
+                        next_action_at_ms=?,
+                        updated_at_ms=?
+                    WHERE instance_id=?
+                      AND task_type='wake_up'
+                    """.strip(),
+                    (int(now_ms), int(now_ms), int(instance_id)),
+                )
+                if int(i_cur.rowcount or 0) != 1:
+                    raise RuntimeError("instance_update_failed_after_attempt_update")
+                return "updated"
+
+            row = conn.execute(
+                """
+                SELECT
+                  a.result_code AS attempt_result_code,
+                  i.status AS instance_status,
+                  i.task_type AS instance_task_type,
+                  t.enabled AS task_enabled
+                FROM task_attempts a
+                JOIN task_instances i
+                  ON i.instance_id=a.instance_id
+                LEFT JOIN tasks t
+                  ON t.account_id=i.account_id AND t.task_type=i.task_type
+                WHERE a.attempt_id=? AND a.instance_id=?
+                LIMIT 1
+                """.strip(),
+                (int(attempt_id), int(instance_id)),
+            ).fetchone()
+            if not row:
+                return "attempt_not_found"
+
+            instance_task_type = str(row["instance_task_type"] or "").strip()
+            if instance_task_type != "wake_up":
+                return "wrong_task_type"
+
+            task_enabled = int(row["task_enabled"] or 0)
+            if task_enabled != 1:
+                return "task_disabled_or_missing"
+
+            instance_status = str(row["instance_status"] or "").strip()
+            if instance_status not in ("PENDING", "IN_PROGRESS"):
+                return "instance_not_active"
+
+            latest_attempt_row = conn.execute(
+                """
+                SELECT attempt_id
+                FROM task_attempts
+                WHERE instance_id=?
+                ORDER BY at_ms DESC
+                LIMIT 1
+                """.strip(),
+                (int(instance_id),),
+            ).fetchone()
+            latest_attempt_id = int(latest_attempt_row["attempt_id"]) if latest_attempt_row else 0
+            if latest_attempt_id != int(attempt_id):
+                return "attempt_not_latest"
+
+            attempt_result_code = str(row["attempt_result_code"] or "").strip()
+            if attempt_result_code == "ok":
+                return "already_ok"
+
+            return "precondition_failed"
+
     def execute_many(self, sql: str, params_seq: Iterable[tuple[Any, ...]]) -> None:
         with self._connect() as conn:
             conn.executemany(sql, list(params_seq))

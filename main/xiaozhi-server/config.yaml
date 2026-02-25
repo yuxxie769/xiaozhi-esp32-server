@@ -169,6 +169,30 @@ plugins:
     api_key: "ragflow-xxx"
     # ragflow知识库id
     dataset_ids: ["123456789"]
+  # Task Engine control-plane (LLM mediated state correction).
+  # To expose this tool to the LLM, set expose_to_llm: true (and enabled: true).
+  task_engine_control:
+    enabled: false
+    expose_to_llm: false
+    # Whether to require plugins.task_engine.enabled==true for control to work.
+    require_task_engine_enabled: false
+    # Binding TTL on the connection (seconds).
+    ctx_ttl_seconds: 1800
+    # Allow user_confirm override when the attempt result_code is one of these.
+    allow_user_confirm_codes: ["nobody", "unknown", "unavailable"]
+    # Require vision_confirm override when the attempt result_code is one of these.
+    require_vision_confirm_codes: ["unwake"]
+    # For vision_confirm, require awake=true and confidence >= this threshold.
+    vision_min_confidence: 0.6
+    allowed_vision_evidence_tools: ["wake_check"]
+    recent_user_messages: 8
+    max_quote_chars: 80
+  # Visual confirm_event exposure knobs:
+  # - expose_to_llm: expose confirm_event itself
+  # - expose_wrappers_to_llm: expose wrappers like wake_check
+  confirm_event:
+    expose_to_llm: false
+    expose_wrappers_to_llm: true
 # 声纹识别配置
 voiceprint:
   # 声纹接口地址
