@@ -37,3 +37,12 @@ class LLMProviderBase(ABC):
         for token in self.response(session_id, dialogue):
             yield token, None
 
+    def consume_last_assistant_message_extras(self):
+        """
+        Optional hook for providers to pass-through assistant-side extra fields
+        (e.g. OpenRouter's reasoning_details) into the next request by storing
+        them in Dialogue history.
+
+        Default: no extras.
+        """
+        return None

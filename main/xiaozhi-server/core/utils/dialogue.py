@@ -12,12 +12,14 @@ class Message:
         uniq_id: str = None,
         tool_calls=None,
         tool_call_id=None,
+        extra: dict = None,
     ):
         self.uniq_id = uniq_id if uniq_id is not None else str(uuid.uuid4())
         self.role = role
         self.content = content
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
+        self.extra = extra
 
 
 class Dialogue:
@@ -43,7 +45,13 @@ class Dialogue:
                 }
             )
         else:
-            dialogue.append({"role": m.role, "content": m.content})
+            payload = {"role": m.role, "content": m.content}
+            extra = getattr(m, "extra", None)
+            if isinstance(extra, dict) and extra:
+                # Avoid overriding core fields
+                extra = {k: v for k, v in extra.items() if k not in ("role", "content")}
+                payload.update(extra)
+            dialogue.append(payload)
 
     def get_llm_dialogue(self) -> List[Dict[str, str]]:
         # 直接调用get_llm_dialogue_with_memory，传入None作为memory_str

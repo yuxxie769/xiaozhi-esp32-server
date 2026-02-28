@@ -547,6 +547,24 @@ VAD:
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
   # 当前支持的type为openai、dify、ollama，可自行适配
+  # OpenRouter（OpenAI兼容接口）示例：
+  # OpenRouterLLM:
+  #   type: openai
+  #   base_url: https://openrouter.ai/api/v1
+  #   model_name: google/gemini-3-flash-preview
+  #   api_key: 你的OpenRouter API Key
+  #   # 可选：归因/统计头
+  #   # default_headers:
+  #   #   HTTP-Referer: "https://your-site.example"
+  #   #   X-Title: "XiaoZhi"
+  #   # 可选：透传 OpenRouter 扩展字段（reasoning / plugins 等）
+  #   # extra_body:
+  #   #   reasoning:
+  #   #     enabled: true
+  #   #   plugins:
+  #   #     - id: web
+  #   #       max_results: 5
+  #   # stream: true  # 默认true；如需获取reasoning_details且流式拿不到，可临时设为false
   AliLLM:
     # 定义LLM API类型
     type: openai

@@ -34,7 +34,7 @@ from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from plugins_func.loadplugins import auto_import_modules
 from plugins_func.register import Action, ActionResponse
 from core.auth import AuthenticationError
-from config.config_loader import get_private_config_from_api
+from config.config_loader import get_private_config_from_api, get_project_dir
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException
@@ -636,6 +636,43 @@ class ConnectionHandler:
             self.config["selected_module"]["LLM"] = private_config["selected_module"][
                 "LLM"
             ]
+            # Allow local request-time overrides (from config/data/.config.yaml) to be applied
+            # on top of manager-api model configs without duplicating the whole LLM entry.
+            try:
+                llm_overrides = (
+                    (self.common_config.get("llm_request_overrides") or {})
+                    if isinstance(self.common_config, dict)
+                    else {}
+                )
+                if not isinstance(llm_overrides, dict):
+                    llm_overrides = {}
+
+                selected_llm_key = (
+                    (private_config.get("selected_module") or {}).get("LLM")
+                    or (self.config.get("selected_module") or {}).get("LLM")
+                )
+                selected_llm_key = str(selected_llm_key or "").strip() or None
+
+                if selected_llm_key and isinstance(private_config.get("LLM"), dict):
+                    provider_cfg = private_config["LLM"].get(selected_llm_key)
+                    if isinstance(provider_cfg, dict) and llm_overrides:
+                        for k in (
+                            "extra_body",
+                            "default_headers",
+                            "stream",
+                            "allow_message_extras",
+                        ):
+                            if k in llm_overrides:
+                                provider_cfg[k] = llm_overrides.get(k)
+                        # keep self.config in sync for any later code paths that read from it
+                        if (
+                            isinstance(self.config.get("LLM"), dict)
+                            and selected_llm_key in self.config["LLM"]
+                            and isinstance(self.config["LLM"].get(selected_llm_key), dict)
+                        ):
+                            self.config["LLM"][selected_llm_key] = provider_cfg
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"合并本地LLM请求覆盖配置失败: {e}")
         if private_config.get("VLLM", None) is not None:
             self.config["VLLM"] = private_config["VLLM"]
             self.config["selected_module"]["VLLM"] = private_config["selected_module"][
@@ -982,6 +1019,56 @@ class ConnectionHandler:
             log_llm_max_chars = 8000
         enable_llm_logging_this_call = depth == 0 or log_llm_include_nested
 
+        dump_messages_file = llm_debug_cfg.get("dump_messages_file") or os.getenv(
+            "XIAOZHI_LLM_MESSAGES_DUMP_FILE"
+        )
+        dump_messages_pretty = bool(
+            llm_debug_cfg.get("dump_messages_pretty", False)
+            or os.getenv("XIAOZHI_LLM_MESSAGES_DUMP_PRETTY") == "1"
+        )
+        try:
+            dump_messages_max_chars = int(
+                llm_debug_cfg.get("dump_messages_max_chars", 0)
+                or os.getenv("XIAOZHI_LLM_MESSAGES_DUMP_MAX_CHARS", "0")
+            )
+        except Exception:
+            dump_messages_max_chars = 0
+
+        if dump_messages_file is True:
+            dump_messages_file = "logs/llm_messages.txt"
+        if dump_messages_file in (False, None, ""):
+            dump_messages_file = None
+
+        def _dump_llm_messages_to_file(messages_payload: str) -> None:
+            if not dump_messages_file:
+                return
+            try:
+                path = str(dump_messages_file)
+                if not os.path.isabs(path):
+                    path = os.path.join(get_project_dir(), path.lstrip("/"))
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+                now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                header = (
+                    f"\n\n==== {now_str} device={self.device_id} session={self.session_id} depth={depth} ====\n"
+                )
+                body = messages_payload or ""
+                if dump_messages_max_chars and len(body) > dump_messages_max_chars:
+                    body = body[:dump_messages_max_chars] + "...(truncated)"
+
+                try:
+                    import portalocker
+
+                    with portalocker.Lock(path, "a", timeout=2) as f:
+                        f.write(header)
+                        f.write(body)
+                except Exception:
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write(header)
+                        f.write(body)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"写入LLM messages dump文件失败: {e}")
+
         if enable_llm_logging_this_call and log_llm_user_prompt:
             try:
                 user_prompt = ""
@@ -1069,13 +1156,23 @@ class ConnectionHandler:
                                 f"LLM请求-最终system prompt(depth={depth}): {system_prompt_preview}"
                             )
                         try:
-                            messages_json = json.dumps(llm_dialogue, ensure_ascii=False)
+                            messages_json_full = json.dumps(
+                                llm_dialogue,
+                                ensure_ascii=False,
+                                indent=2 if dump_messages_pretty else None,
+                            )
+                            messages_json = (
+                                messages_json_full
+                                if dump_messages_pretty
+                                else json.dumps(llm_dialogue, ensure_ascii=False)
+                            )
                             if len(messages_json) > log_llm_max_chars:
                                 messages_json = messages_json[:log_llm_max_chars]
                                 messages_json += "...(truncated)"
                             self.logger.bind(tag=TAG).info(
                                 f"LLM请求-最终messages JSON(depth={depth}): {messages_json}"
                             )
+                            _dump_llm_messages_to_file(messages_json_full)
                         except Exception:
                             pass
                 except Exception as e:
@@ -1317,7 +1414,14 @@ class ConnectionHandler:
                 if len(response_message) > 0:
                     text_buff = "".join(response_message)
                     self.tts_MessageText = text_buff
-                    self.dialogue.put(Message(role="assistant", content=text_buff))
+                    extras = None
+                    try:
+                        extras = self.llm.consume_last_assistant_message_extras()
+                    except Exception:
+                        extras = None
+                    self.dialogue.put(
+                        Message(role="assistant", content=text_buff, extra=extras)
+                    )
                 response_message.clear()
 
                 self.logger.bind(tag=TAG).debug(
@@ -1459,7 +1563,12 @@ class ConnectionHandler:
         if len(response_message) > 0:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
-            self.dialogue.put(Message(role="assistant", content=text_buff))
+            extras = None
+            try:
+                extras = self.llm.consume_last_assistant_message_extras()
+            except Exception:
+                extras = None
+            self.dialogue.put(Message(role="assistant", content=text_buff, extra=extras))
         if depth == 0:
             _finalize_top_level_chat()
             # Keep any <Q> detected in nested chat() calls (e.g. tool follow-up generation).

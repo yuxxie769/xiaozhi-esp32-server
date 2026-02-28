@@ -154,16 +154,31 @@ async def get_config_from_api_async(config):
                         union.append(fn)
             local_functions = union
 
-        if local_functions and active_intent_key:
-            if active_intent_key not in config_data["Intent"] or not isinstance(config_data["Intent"].get(active_intent_key), dict):
-                config_data["Intent"][active_intent_key] = {}
-            remote_functions = config_data["Intent"][active_intent_key].get("functions")
-            if not isinstance(remote_functions, list):
-                remote_functions = []
-            for fn in local_functions:
-                if fn not in remote_functions:
-                    remote_functions.append(fn)
-            config_data["Intent"][active_intent_key]["functions"] = remote_functions
+    if local_functions and active_intent_key:
+        if active_intent_key not in config_data["Intent"] or not isinstance(config_data["Intent"].get(active_intent_key), dict):
+            config_data["Intent"][active_intent_key] = {}
+        remote_functions = config_data["Intent"][active_intent_key].get("functions")
+        if not isinstance(remote_functions, list):
+            remote_functions = []
+        for fn in local_functions:
+            if fn not in remote_functions:
+                remote_functions.append(fn)
+        config_data["Intent"][active_intent_key]["functions"] = remote_functions
+
+    # Pass through local LLM request overrides (e.g. OpenRouter extra_body/default_headers).
+    # This is intentionally stored separately from the manager-provided LLM configs so operators can
+    # tweak request-time behaviors without duplicating full model configs in data/.config.yaml.
+    if isinstance(config, dict):
+        local_overrides = (
+            config.get("llm_request_overrides")
+            or config.get("LLM_request_overrides")
+            or config.get("llm_overrides")
+            or config.get("LLM_overrides")
+            or (config.get("LLM", {}) or {}).get("_request_overrides")
+            or (config.get("LLM", {}) or {}).get("_overrides")
+        )
+        if isinstance(local_overrides, dict) and local_overrides:
+            config_data["llm_request_overrides"] = local_overrides
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
